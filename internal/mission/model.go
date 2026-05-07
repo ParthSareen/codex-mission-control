@@ -16,7 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"codex-mission-control/internal/codex"
+	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
 type screenMode int

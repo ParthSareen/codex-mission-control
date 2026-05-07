@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"codex-mission-control/internal/codex"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
 func TestDisplayStatusMarksUnseenFinalForReview(t *testing.T) {

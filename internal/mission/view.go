@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"codex-mission-control/internal/codex"
+	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
 func (m Model) View() string {

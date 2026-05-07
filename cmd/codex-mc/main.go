@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"codex-mission-control/internal/mission"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/parthsareen/codex-mission-control/internal/mission"
 )
 
 func main() {

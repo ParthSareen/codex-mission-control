@@ -1,4 +1,4 @@
-module codex-mission-control
+module github.com/parthsareen/codex-mission-control
 
 go 1.26
 
