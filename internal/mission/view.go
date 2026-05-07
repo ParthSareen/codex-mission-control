@@ -143,6 +143,9 @@ func (m Model) renderMain(height int) string {
 
 func (m Model) renderMission(height int) string {
 	title := "NEW MISSION"
+	if m.missionMode == missionSelectDir && !m.missionAllowCreate {
+		title = "WORKSPACE SEARCH"
+	}
 	content := m.renderMissionContent(m.width-2, height-3)
 	return m.panel(m.width, height, title, content, true)
 }
@@ -155,15 +158,21 @@ func (m Model) renderMissionContent(width, height int) string {
 	var rows []string
 	switch m.missionMode {
 	case missionSelectDir:
+		helper := "recent dirs, current repo, ~/Documents/repos; type a new name to create"
+		empty := "No matching directory. Type an existing path or a new repo name."
+		if !m.missionAllowCreate {
+			helper = "search existing folders and git worktrees from recent threads and ~/Documents/repos"
+			empty = "No matching folder or worktree."
+		}
 		rows = append(rows,
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("SELECT WORKSPACE", width)),
 			fit(m.missionInput.View(), width),
-			lipgloss.NewStyle().Foreground(t.dim).Render(fit("recent dirs, current repo, ~/Documents/repos; type a new name to create", width)),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit(helper, width)),
 			"",
 		)
 		choices := m.missionDirChoices()
 		if len(choices) == 0 {
-			rows = append(rows, lipgloss.NewStyle().Foreground(t.err).Render(fit("No matching directory. Type an existing path or a new repo name.", width)))
+			rows = append(rows, lipgloss.NewStyle().Foreground(t.err).Render(fit(empty, width)))
 			break
 		}
 		remaining := max(0, height-len(rows))
@@ -184,8 +193,14 @@ func (m Model) renderMissionContent(width, height int) string {
 				if i == m.missionDirCursor {
 					style = style.Background(t.panel).Foreground(t.primary).Bold(true)
 				}
+			} else if choice.worktree {
+				tag = "WORKTREE"
+				style = style.Foreground(t.accent)
+				if i == m.missionDirCursor {
+					style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+				}
 			}
-			label := fmt.Sprintf("%s %-6s %-22s %s", prefix, tag, truncate(filepathBase(choice.dir), 22), truncate(choice.dir, max(1, width-34)))
+			label := fmt.Sprintf("%s %-8s %-22s %s", prefix, tag, truncate(filepathBase(choice.dir), 22), truncate(choice.dir, max(1, width-36)))
 			rows = append(rows, style.Render(fit(label, width)))
 		}
 	case missionSelectKind:
@@ -596,9 +611,9 @@ func (m Model) renderStatus() string {
 	} else if m.focus == focusComms {
 		focus = "comms"
 	}
-	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  n new  c comms  d diff  o fleet  r launch  R ask  t theme  space pause  q quit", focus)
+	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  n new  w workspace  c comms  d diff  o fleet  r launch  R ask  t theme  space pause  q quit", focus)
 	if m.mode == modeFocus {
-		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  n new  d diff  o fleet  r launch  R ask  q quit", focus)
+		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  n new  w workspace  d diff  o fleet  r launch  R ask  q quit", focus)
 	}
 	if m.status != "" {
 		left = m.status + "   " + left
@@ -622,6 +637,9 @@ func (m Model) renderAskBar() string {
 func (m Model) renderMissionStatus() string {
 	t := m.theme()
 	text := "new mission: type filter/path/new repo  up/down select  enter continue  esc cancel"
+	if m.missionMode == missionSelectDir && !m.missionAllowCreate {
+		text = "workspace search: type filter/path  up/down select  enter choose mission type  esc cancel"
+	}
 	switch m.missionMode {
 	case missionSelectKind:
 		text = "new mission: choose type  b new branch  r review  s standard  up/down select  enter continue  esc cancel"

@@ -75,12 +75,13 @@ type Model struct {
 	askMode bool
 	ask     textinput.Model
 
-	missionMode       missionMode
-	missionInput      textinput.Model
-	missionDir        string
-	missionDirCursor  int
-	missionKindCursor int
-	git               gitSnapshot
+	missionMode        missionMode
+	missionInput       textinput.Model
+	missionDir         string
+	missionDirCursor   int
+	missionAllowCreate bool
+	missionKindCursor  int
+	git                gitSnapshot
 }
 
 type refreshMsg struct {
@@ -125,8 +126,9 @@ type uiStateSavedMsg struct {
 }
 
 type missionDirChoice struct {
-	dir    string
-	create bool
+	dir      string
+	create   bool
+	worktree bool
 }
 
 type missionKindChoice struct {
@@ -391,6 +393,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.startMission()
 		return m, textinput.Blink
+	case "w":
+		m.startWorkspaceSearch()
+		return m, textinput.Blink
 	case "tab":
 		if m.mode == modeFocus {
 			if m.focus == focusThreads {
@@ -554,9 +559,25 @@ func (m *Model) startMission() {
 	m.missionMode = missionSelectDir
 	m.missionDir = ""
 	m.missionDirCursor = 0
+	m.missionAllowCreate = true
 	m.missionKindCursor = 0
 	m.missionInput.Prompt = "DIR> "
 	m.missionInput.Placeholder = "Filter recent dirs or type a directory path..."
+	m.missionInput.SetValue("")
+	m.missionInput.Width = max(20, m.width-10)
+	m.missionInput.Focus()
+}
+
+func (m *Model) startWorkspaceSearch() {
+	m.askMode = false
+	m.ask.Blur()
+	m.missionMode = missionSelectDir
+	m.missionDir = ""
+	m.missionDirCursor = 0
+	m.missionAllowCreate = false
+	m.missionKindCursor = 0
+	m.missionInput.Prompt = "FIND> "
+	m.missionInput.Placeholder = "Search folders and worktrees..."
 	m.missionInput.SetValue("")
 	m.missionInput.Width = max(20, m.width-10)
 	m.missionInput.Focus()
@@ -693,6 +714,7 @@ func (m *Model) cancelMission() {
 	m.missionMode = missionOff
 	m.missionDir = ""
 	m.missionDirCursor = 0
+	m.missionAllowCreate = false
 	m.missionKindCursor = 0
 	m.missionInput.Blur()
 	m.missionInput.SetValue("")
@@ -1354,6 +1376,11 @@ func dirExists(dir string) bool {
 	return err == nil && info.IsDir()
 }
 
+func isGitWorktree(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil && !info.IsDir()
+}
+
 func documentsReposDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -1497,17 +1524,19 @@ func (m Model) missionDirChoices() []missionDirChoice {
 		out = append(out, choice)
 	}
 	if dir, ok := typedMissionDir(m.missionInput.Value()); ok {
-		add(missionDirChoice{dir: dir})
+		add(missionDirChoice{dir: dir, worktree: isGitWorktree(dir)})
 	}
-	if dir, ok := missionCreateDir(rawQuery); ok {
-		add(missionDirChoice{dir: dir, create: true})
+	if m.missionAllowCreate {
+		if dir, ok := missionCreateDir(rawQuery); ok {
+			add(missionDirChoice{dir: dir, create: true})
+		}
 	}
 	dirs := m.missionDirOptions()
 	for _, dir := range dirs {
 		if query == "" ||
 			strings.Contains(strings.ToLower(dir), query) ||
 			strings.Contains(strings.ToLower(filepath.Base(dir)), query) {
-			add(missionDirChoice{dir: dir})
+			add(missionDirChoice{dir: dir, worktree: isGitWorktree(dir)})
 		}
 	}
 	return out

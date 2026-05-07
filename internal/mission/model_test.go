@@ -337,6 +337,38 @@ func TestMissionDirChoicesOfferCreateUnderDocumentsRepos(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSearchDoesNotOfferCreate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "Documents", "repos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New("", 10)
+	m.startWorkspaceSearch()
+	m.missionInput.SetValue("new-lab")
+
+	if choices := m.missionDirChoices(); len(choices) != 0 {
+		t.Fatalf("workspace search choices = %#v, want none", choices)
+	}
+}
+
+func TestMissionDirChoicesMarkWorktree(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /tmp/gitdir\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New("", 10)
+	m.startWorkspaceSearch()
+	m.missionInput.SetValue(dir)
+
+	choice := m.selectedMissionDirChoice()
+	if !choice.worktree {
+		t.Fatalf("worktree = false, want true: %#v", choice)
+	}
+}
+
 func TestNewMissionCreatesSelectedRepoDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -424,6 +456,26 @@ func TestMissionDirFilterAllowsJAndKTyping(t *testing.T) {
 
 	if got := m.missionInput.Value(); got != "jk" {
 		t.Fatalf("mission filter value = %q, want jk", got)
+	}
+}
+
+func TestWorkspaceSearchKeyStartsFolderSearch(t *testing.T) {
+	m := New("", 10)
+
+	next, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	m = next.(Model)
+
+	if cmd == nil {
+		t.Fatal("workspace search key returned nil cmd, want blink")
+	}
+	if m.missionMode != missionSelectDir {
+		t.Fatalf("mission mode = %v, want select dir", m.missionMode)
+	}
+	if m.missionAllowCreate {
+		t.Fatal("missionAllowCreate = true, want false")
+	}
+	if m.missionInput.Prompt != "FIND> " {
+		t.Fatalf("prompt = %q, want FIND> ", m.missionInput.Prompt)
 	}
 }
 
