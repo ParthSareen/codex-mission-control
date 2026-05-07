@@ -260,16 +260,25 @@ func TestCodexNewMissionShellLineQuotesCWDAndPrompt(t *testing.T) {
 }
 
 func TestCodexReviewShellLineRunsReview(t *testing.T) {
-	line := codexReviewShellLine("/tmp/review tree")
+	mergeBase := "7c2c36bda271075b95513b7009d4df007bbfa497"
+	line := codexReviewShellLine("/tmp/review tree", "main", mergeBase)
 
 	for _, want := range []string{
 		"cd '/tmp/review tree'",
-		"codex '/review'",
+		"codex 'Review the code changes against the base branch '\"'\"'main'\"'\"'. The merge base commit for this comparison is 7c2c36bda271075b95513b7009d4df007bbfa497. Run `git diff 7c2c36bda271075b95513b7009d4df007bbfa497` to inspect the changes relative to main. Provide prioritized, actionable findings.'",
 		"printf '\\n[codex exited - press enter or close this terminal]\\n'",
 	} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("review shell line %q does not contain %q", line, want)
 		}
+	}
+}
+
+func TestReviewPromptMatchesExpectedStyle(t *testing.T) {
+	mergeBase := "7c2c36bda271075b95513b7009d4df007bbfa497"
+	want := "Review the code changes against the base branch 'main'. The merge base commit for this comparison is 7c2c36bda271075b95513b7009d4df007bbfa497. Run `git diff 7c2c36bda271075b95513b7009d4df007bbfa497` to inspect the changes relative to main. Provide prioritized, actionable findings."
+	if got := reviewPrompt("main", mergeBase); got != want {
+		t.Fatalf("review prompt = %q, want %q", got, want)
 	}
 }
 

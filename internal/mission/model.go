@@ -19,6 +19,8 @@ import (
 	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
+const reviewBaseBranch = "main"
+
 type screenMode int
 
 const (
@@ -884,7 +886,11 @@ func launchReviewBranchMissionCmd(repoDir, branch string) tea.Cmd {
 		if err != nil {
 			return launchDoneMsg{err: err}
 		}
-		line := codexReviewShellLine(worktreeDir)
+		mergeBase, err := reviewMergeBase(worktreeDir, reviewBaseBranch)
+		if err != nil {
+			return launchDoneMsg{err: err}
+		}
+		line := codexReviewShellLine(worktreeDir, reviewBaseBranch, mergeBase)
 		if err := launchCodexDetached(worktreeDir, "codex-review", line); err != nil {
 			return launchDoneMsg{err: err}
 		}
@@ -1009,8 +1015,12 @@ func codexNewMissionShellLine(cwd, prompt string) string {
 	return strings.Join(parts, " ")
 }
 
-func codexReviewShellLine(cwd string) string {
-	return codexNewMissionShellLine(cwd, "/review")
+func codexReviewShellLine(cwd, baseBranch, mergeBase string) string {
+	return codexNewMissionShellLine(cwd, reviewPrompt(baseBranch, mergeBase))
+}
+
+func reviewPrompt(baseBranch, mergeBase string) string {
+	return fmt.Sprintf("Review the code changes against the base branch '%s'. The merge base commit for this comparison is %s. Run `git diff %s` to inspect the changes relative to %s. Provide prioritized, actionable findings.", baseBranch, mergeBase, mergeBase, baseBranch)
 }
 
 func shellQuote(s string) string {
@@ -1028,6 +1038,21 @@ func gitOutput(cwd string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func reviewMergeBase(cwd, baseBranch string) (string, error) {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return "", fmt.Errorf("empty base branch")
+	}
+	if mergeBase, err := gitOutput(cwd, "merge-base", baseBranch, "HEAD"); err == nil {
+		return mergeBase, nil
+	}
+	remoteBase := "origin/" + baseBranch
+	if mergeBase, err := gitOutput(cwd, "merge-base", remoteBase, "HEAD"); err == nil {
+		return mergeBase, nil
+	}
+	return "", fmt.Errorf("git merge-base: could not find merge base against %s or %s", baseBranch, remoteBase)
 }
 
 func loadGitSnapshot(cwd string) gitSnapshot {
@@ -1312,7 +1337,7 @@ func missionKindChoices() []missionKindChoice {
 		},
 		{
 			label:       "REVIEW BRANCH",
-			description: "Create a git worktree from a pasted branch/ref, then run /review.",
+			description: "Create a git worktree, compute merge base, then run review.",
 			review:      true,
 		},
 	}

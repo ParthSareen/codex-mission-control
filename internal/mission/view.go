@@ -222,11 +222,11 @@ func (m Model) renderMissionContent(width, height int) string {
 		rows = append(rows,
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("REVIEW BRANCH", width)),
 			kv("repo", m.missionDir, width),
-			lipgloss.NewStyle().Foreground(t.dim).Render(fit("creates a sibling worktree, then launches Codex with /review", width)),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("creates a sibling worktree, computes merge base, then launches review", width)),
 			"",
 			fit(m.missionInput.View(), width),
 			"",
-			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter creates worktree and launches review; esc cancels", width)),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter creates worktree and launches review prompt; esc cancels", width)),
 		)
 	default:
 		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("Mission console offline.", width)))
@@ -618,7 +618,7 @@ func (m Model) renderMissionStatus() string {
 	case missionDescribe:
 		text = "new mission: describe objective  enter launch  esc cancel"
 	case missionReviewBranch:
-		text = "new mission: paste branch/ref  enter create worktree + /review  esc cancel"
+		text = "new mission: paste branch/ref  enter create worktree + review prompt  esc cancel"
 	}
 	if m.status != "" {
 		text = m.status + "   " + text
