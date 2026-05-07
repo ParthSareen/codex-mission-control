@@ -65,8 +65,9 @@ q              quit
 Themes: green, cyan, amber, blue, purple, red, white.
 
 Mission Control remembers the last theme, selected thread, pane, comms
-position, and seen final timestamps in
-`~/.codex/mission-control/state.json`.
+position, intro splash preference, and seen final timestamps in
+`~/.codex/mission-control/state.json`. Set `"intro_splash": false` there to
+skip the startup splash.
 
 Escalation requests, such as tool calls with
 `sandbox_permissions: "require_escalated"`, render as `ALERT`. Threads with a

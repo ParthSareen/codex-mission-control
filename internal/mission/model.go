@@ -19,7 +19,10 @@ import (
 	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
-const reviewBaseBranch = "main"
+const (
+	reviewBaseBranch = "main"
+	introSplashTicks = 7
+)
 
 type screenMode int
 
@@ -71,6 +74,8 @@ type Model struct {
 	threadOrder map[string]int
 	nextOrder   int
 	restoreID   string
+	introSplash bool
+	introActive bool
 
 	askMode bool
 	ask     textinput.Model
@@ -163,6 +168,7 @@ type gitSnapshot struct {
 type persistedUIState struct {
 	Theme          string            `json:"theme"`
 	ThemeIndex     int               `json:"theme_index"`
+	IntroSplash    *bool             `json:"intro_splash,omitempty"`
 	SelectedThread string            `json:"selected_thread"`
 	Mode           string            `json:"mode"`
 	Focus          string            `json:"focus"`
@@ -193,10 +199,15 @@ func New(codexHome string, limit int) Model {
 		seenFinals:   make(map[string]time.Time),
 		threadOrder:  make(map[string]int),
 		themeIdx:     0,
+		introSplash:  true,
+		introActive:  true,
 		ask:          ti,
 		missionInput: mi,
 	}
 	model.loadUIState()
+	if !model.introSplash {
+		model.introActive = false
+	}
 	return model
 }
 
@@ -241,6 +252,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.tick++
 		cmds := []tea.Cmd{tickEvery(260 * time.Millisecond)}
+		if m.introActive && (!m.introSplash || m.tick >= introSplashTicks) {
+			m.introActive = false
+		}
 		if !m.paused && m.tick%4 == 0 {
 			cmds = append(cmds, refreshCmd(m))
 		}
@@ -335,6 +349,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case tea.KeyMsg:
+		if m.introActive && m.introSplash {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			default:
+				m.introActive = false
+				return m, nil
+			}
+		}
 		if m.missionMode != missionOff {
 			next, cmd := m.handleMissionKey(msg)
 			return persistAfterUpdate(next, cmd)
@@ -348,6 +371,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return persistAfterUpdate(next, cmd)
 
 	case tea.MouseMsg:
+		if m.introActive && m.introSplash {
+			m.introActive = false
+			return m, nil
+		}
 		next, cmd := m.handleMouse(msg)
 		return persistAfterUpdate(next, cmd)
 	}
@@ -1867,6 +1894,9 @@ func (m *Model) loadUIState() {
 	} else if state.ThemeIndex >= 0 && state.ThemeIndex < len(themes) {
 		m.themeIdx = state.ThemeIndex
 	}
+	if state.IntroSplash != nil {
+		m.introSplash = *state.IntroSplash
+	}
 	if mode, ok := parseScreenMode(state.Mode); ok {
 		m.mode = mode
 	}
@@ -1902,9 +1932,11 @@ func (m Model) saveUIState() error {
 		return nil
 	}
 	selected := m.selectedThread().ID
+	introSplash := m.introSplash
 	state := persistedUIState{
 		Theme:          m.theme().name,
 		ThemeIndex:     m.themeIdx % len(themes),
+		IntroSplash:    &introSplash,
 		SelectedThread: selected,
 		Mode:           screenModeName(m.mode),
 		Focus:          focusTargetName(m.focus),

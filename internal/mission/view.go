@@ -17,6 +17,9 @@ func (m Model) View() string {
 	if m.height < 18 || m.width < 72 {
 		return lipgloss.NewStyle().Foreground(t.primary).Render("Terminal too small for Codex Mission Control")
 	}
+	if m.introActive && m.introSplash {
+		return m.renderIntro()
+	}
 
 	header := m.renderHeader()
 	status := m.renderStatus()
@@ -32,6 +35,55 @@ func (m Model) View() string {
 		body = m.renderMission(bodyHeight)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, status)
+}
+
+func (m Model) renderIntro() string {
+	t := m.theme()
+	width := min(92, max(60, m.width-10))
+	scanW := max(36, width-10)
+	sweep := m.tick % scanW
+	scan := make([]string, scanW)
+	for i := range scan {
+		scan[i] = lipgloss.NewStyle().Foreground(t.dim).Render(".")
+	}
+	for _, offset := range []int{0, 1, 2} {
+		pos := (sweep + offset) % scanW
+		mark := "|"
+		if offset == 1 {
+			mark = ">"
+		}
+		scan[pos] = lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(mark)
+	}
+	for i, marker := range []string{"C", "M", "C"} {
+		pos := ((i + 1) * scanW / 4)
+		scan[pos] = lipgloss.NewStyle().Foreground(t.warn).Bold(true).Render(marker)
+	}
+
+	title := lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render("CODEX MISSION CONTROL")
+	subtitle := lipgloss.NewStyle().Foreground(t.warn).Render("TACTICAL THREAD INTERFACE")
+	bootStyle := lipgloss.NewStyle().Foreground(t.dim)
+	hotStyle := lipgloss.NewStyle().Foreground(t.accent).Bold(true)
+	rows := []string{
+		title,
+		subtitle,
+		"",
+		strings.Join(scan, ""),
+		"",
+		bootStyle.Render("UPLINK     ") + hotStyle.Render("LOCKED"),
+		bootStyle.Render("COMMS      ") + hotStyle.Render("STREAMING"),
+		bootStyle.Render("REVIEWS    ") + hotStyle.Render("DECODED"),
+		bootStyle.Render("CONTROL    ") + hotStyle.Render("ONLINE"),
+		"",
+		lipgloss.NewStyle().Foreground(t.dim).Render("INITIALIZING MISSION BUS"),
+	}
+	content := strings.Join(rows, "\n")
+	panel := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(t.primary).
+		Width(width).
+		Padding(1, 3).
+		Render(content)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
 }
 
 func (m Model) renderHeader() string {
@@ -515,6 +567,7 @@ func (m Model) renderComms(width, height int) string {
 	for _, line := range lines {
 		fromBottom := len(allLines) - 1 - line.index
 		_, style := m.eventStyle(codex.Event{Kind: line.kind, Failed: line.failed, Escalation: line.escalation})
+		style = m.commsLineStyle(line, style)
 		if m.focus == focusComms {
 			if m.visualMode && inRange(fromBottom, m.commsCursor, m.visualStart) {
 				style = style.Background(t.panel).Foreground(t.text)
@@ -526,6 +579,26 @@ func (m Model) renderComms(width, height int) string {
 		rendered = append(rendered, style.Render(fit(line.text, width)))
 	}
 	return strings.Join(rendered, "\n")
+}
+
+func (m Model) commsLineStyle(line commsLine, base lipgloss.Style) lipgloss.Style {
+	t := m.theme()
+	switch line.tone {
+	case "review-header":
+		return base.Foreground(t.warn).Bold(true)
+	case "review-critical":
+		return base.Foreground(t.err).Bold(true)
+	case "review-warning":
+		return base.Foreground(t.warn).Bold(true)
+	case "review-note":
+		return base.Foreground(t.accent).Bold(true)
+	case "review-body":
+		return base.Foreground(t.dim)
+	case "review-overall":
+		return base.Foreground(t.primary)
+	default:
+		return base
+	}
 }
 
 func (m Model) renderTelemetry(width, height int) string {
@@ -760,8 +833,14 @@ type commsLine struct {
 	index      int
 	kind       string
 	text       string
+	tone       string
 	failed     bool
 	escalation bool
+}
+
+type eventLine struct {
+	text string
+	tone string
 }
 
 func (m Model) commsPlainLines(width int) []commsLine {
@@ -779,10 +858,11 @@ func (m Model) commsPlainLines(width int) []commsLine {
 		}
 		texts := eventDisplayLines(event)
 		for i, text := range texts {
-			for j, wrapped := range wrap(text, max(20, width-16)) {
+			for j, wrapped := range wrap(text.text, max(20, width-16)) {
 				line := commsLine{
 					index:      len(lines),
 					kind:       event.Kind,
+					tone:       text.tone,
 					failed:     event.Failed,
 					escalation: event.Escalation,
 				}
@@ -798,18 +878,22 @@ func (m Model) commsPlainLines(width int) []commsLine {
 	return lines
 }
 
-func eventDisplayLines(event codex.Event) []string {
+func eventDisplayLines(event codex.Event) []eventLine {
 	text := oneLine(event.Text)
 	if event.Kind == "final" {
-		if lines, ok := reviewAnswerLines(event.Text); ok {
-			return lines
+		if lines, ok := reviewAnswerDisplayLines(event.Text); ok {
+			out := make([]eventLine, 0, len(lines))
+			for _, line := range lines {
+				out = append(out, eventLine{text: line.Text, tone: line.Tone})
+			}
+			return out
 		}
 		text = "FINAL ANSWER: " + text
 	}
 	if event.Escalation {
 		text = "ESCALATION REQUESTED: " + strings.TrimPrefix(text, "ESCALATION REQUESTED ")
 	}
-	return []string{text}
+	return []eventLine{{text: text}}
 }
 
 func (m Model) commsContentWidth() int {

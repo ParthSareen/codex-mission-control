@@ -87,6 +87,7 @@ func TestUIStateRoundTrip(t *testing.T) {
 	m.focus = focusComms
 	m.commsScroll = 7
 	m.commsCursor = 2
+	m.introSplash = false
 	m.threads = []codex.Thread{{ID: "thread-a"}}
 	m.seenFinals["thread-a"] = finalAt
 	if err := m.saveUIState(); err != nil {
@@ -105,6 +106,12 @@ func TestUIStateRoundTrip(t *testing.T) {
 	}
 	if restored.commsScroll != 7 || restored.commsCursor != 2 {
 		t.Fatalf("comms position = %d/%d, want 7/2", restored.commsScroll, restored.commsCursor)
+	}
+	if restored.introSplash {
+		t.Fatal("introSplash = true, want false")
+	}
+	if restored.introActive {
+		t.Fatal("introActive = true, want false when intro splash is disabled")
 	}
 	if restored.restoreID != "thread-a" {
 		t.Fatalf("restoreID = %q, want thread-a", restored.restoreID)
@@ -324,6 +331,13 @@ func TestCommsPlainLinesFormatsReviewAnswer(t *testing.T) {
 	}
 	if strings.Contains(joined, `"findings"`) || strings.Contains(joined, "FINAL ANSWER: {") {
 		t.Fatalf("rendered comms leaked raw JSON: %q", joined)
+	}
+	tones := make([]string, 0, len(lines))
+	for _, line := range lines {
+		tones = append(tones, line.tone)
+	}
+	if !containsString(tones, "review-header") || !containsString(tones, "review-note") || !containsString(tones, "review-body") {
+		t.Fatalf("review tones = %#v, want header/note/body", tones)
 	}
 }
 
@@ -670,4 +684,13 @@ func TestGhosttyLaunchScriptUsesSurfaceConfig(t *testing.T) {
 			t.Fatalf("Ghostty script %q does not contain %q", script, want)
 		}
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

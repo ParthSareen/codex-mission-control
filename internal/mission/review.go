@@ -32,6 +32,11 @@ type reviewLineRange struct {
 	End   int `json:"end"`
 }
 
+type reviewDisplayLine struct {
+	Text string
+	Tone string
+}
+
 func parseReviewAnswer(text string) (reviewAnswer, bool) {
 	text = strings.TrimSpace(text)
 	text = strings.TrimPrefix(text, "FINAL ANSWER:")
@@ -50,6 +55,18 @@ func parseReviewAnswer(text string) (reviewAnswer, bool) {
 }
 
 func reviewAnswerLines(text string) ([]string, bool) {
+	display, ok := reviewAnswerDisplayLines(text)
+	if !ok {
+		return nil, false
+	}
+	lines := make([]string, 0, len(display))
+	for _, line := range display {
+		lines = append(lines, line.Text)
+	}
+	return lines, true
+}
+
+func reviewAnswerDisplayLines(text string) ([]reviewDisplayLine, bool) {
 	answer, ok := parseReviewAnswer(text)
 	if !ok {
 		return nil, false
@@ -64,16 +81,19 @@ func reviewAnswerLines(text string) ([]string, bool) {
 		header += fmt.Sprintf("  confidence %.2f", answer.OverallConfidenceScore)
 	}
 
-	lines := []string{header}
+	lines := []reviewDisplayLine{{Text: header, Tone: "review-header"}}
 	for _, finding := range answer.Findings {
-		lines = append(lines, reviewFindingHeadline(finding))
+		lines = append(lines, reviewDisplayLine{
+			Text: reviewFindingHeadline(finding),
+			Tone: reviewFindingTone(finding),
+		})
 		body := oneLine(finding.Body)
 		if body != "" {
-			lines = append(lines, "why: "+body)
+			lines = append(lines, reviewDisplayLine{Text: "why: " + body, Tone: "review-body"})
 		}
 	}
 	if explanation := oneLine(answer.OverallExplanation); explanation != "" {
-		lines = append(lines, "overall: "+explanation)
+		lines = append(lines, reviewDisplayLine{Text: "overall: " + explanation, Tone: "review-overall"})
 	}
 	return lines, true
 }
@@ -109,6 +129,21 @@ func reviewFindingHeadline(finding reviewFinding) string {
 		return fmt.Sprintf("%s %s %s", priorityLabel, location, title)
 	}
 	return fmt.Sprintf("%s %s", priorityLabel, title)
+}
+
+func reviewFindingTone(finding reviewFinding) string {
+	priority := finding.Priority
+	if priority <= 0 {
+		priority = priorityFromTitle(finding.Title)
+	}
+	switch {
+	case priority <= 1:
+		return "review-critical"
+	case priority == 2:
+		return "review-warning"
+	default:
+		return "review-note"
+	}
 }
 
 func reviewLocation(location reviewCodeLocation) string {
