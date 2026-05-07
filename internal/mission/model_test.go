@@ -392,6 +392,79 @@ func TestCommsPlainLinesFormatsReviewAnswer(t *testing.T) {
 	}
 }
 
+func TestEventDisplayLinesFormatsExecCommandCall(t *testing.T) {
+	lines := eventDisplayLines(codex.Event{
+		Kind: "tool-call",
+		Text: `exec_command {"cmd":"rg -n \"splash|preflight\" cmd app docs -g '*.*'","workdir":"/Users/parth/Documents/repos/ollama-launch-codex-app","yield_time_ms":1000,"max_output_tokens":24000}`,
+	})
+	if len(lines) != 2 {
+		t.Fatalf("lines len = %d, want 2: %#v", len(lines), lines)
+	}
+	if lines[0].tone != "exec-command" || lines[0].text != `RUN rg -n "splash|preflight" cmd app docs -g '*.*'` {
+		t.Fatalf("command line = %#v", lines[0])
+	}
+	for _, want := range []string{"cwd repos/ollama-launch-codex-app", "yield 1s", "out 24k"} {
+		if !strings.Contains(lines[1].text, want) {
+			t.Fatalf("meta line = %q, want %q", lines[1].text, want)
+		}
+	}
+	if lines[1].tone != "exec-meta" {
+		t.Fatalf("meta tone = %q, want exec-meta", lines[1].tone)
+	}
+}
+
+func TestEventDisplayLinesFormatsExecCommandResult(t *testing.T) {
+	lines := eventDisplayLines(codex.Event{
+		Kind:   "tool",
+		Failed: true,
+		Text:   "failed exit=1 /bin/zsh -lc sed -n '1,260p' cmd/launch/managed.go",
+	})
+	if len(lines) != 1 {
+		t.Fatalf("lines len = %d, want 1: %#v", len(lines), lines)
+	}
+	want := "FAIL exit=1  sed -n '1,260p' cmd/launch/managed.go"
+	if lines[0].text != want {
+		t.Fatalf("result line = %q, want %q", lines[0].text, want)
+	}
+	if lines[0].tone != "exec-fail" {
+		t.Fatalf("result tone = %q, want exec-fail", lines[0].tone)
+	}
+}
+
+func TestCommsPlainLinesFormatsExecCommand(t *testing.T) {
+	m := Model{
+		events: []codex.Event{
+			{
+				Kind: "tool-call",
+				Text: `exec_command {"cmd":"git status --short","workdir":"/Users/parth/Documents/repos/ollama-launch-codex-app","yield_time_ms":1000,"max_output_tokens":4000}`,
+			},
+			{
+				Kind: "tool",
+				Text: "completed exit=0 /bin/zsh -lc git status --short",
+			},
+		},
+	}
+
+	lines := m.commsPlainLines(120)
+	var rendered []string
+	for _, line := range lines {
+		rendered = append(rendered, line.text)
+	}
+	joined := strings.Join(rendered, "\n")
+	for _, want := range []string{
+		"TOOL+     RUN git status --short",
+		"cwd repos/ollama-launch-codex-app yield 1s out 4k",
+		"TOOL      OK exit=0 git status --short",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("rendered comms %q do not contain %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "exec_command {") || strings.Contains(joined, "/bin/zsh -lc") {
+		t.Fatalf("rendered comms leaked raw exec syntax: %q", joined)
+	}
+}
+
 func TestReviewPriorityColorsStandApartFromAmber(t *testing.T) {
 	amber := themes[2]
 	amberColors := map[string]bool{

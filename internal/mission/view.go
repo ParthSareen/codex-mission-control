@@ -615,6 +615,14 @@ func (m Model) renderComms(width, height int) string {
 func (m Model) commsLineStyle(line commsLine, base lipgloss.Style) lipgloss.Style {
 	t := m.theme()
 	switch line.tone {
+	case "exec-command":
+		return base.Foreground(lipgloss.Color("45")).Bold(true)
+	case "exec-meta":
+		return base.Foreground(t.dim)
+	case "exec-ok":
+		return base.Foreground(lipgloss.Color("46")).Bold(true)
+	case "exec-fail":
+		return base.Foreground(t.err).Bold(true)
 	case "review-header":
 		return base.Foreground(t.warn).Bold(true)
 	case "review-body":
@@ -907,6 +915,9 @@ func (m Model) commsPlainLines(width int) []commsLine {
 }
 
 func eventDisplayLines(event codex.Event) []eventLine {
+	if lines, ok := execEventDisplayLines(event); ok {
+		return lines
+	}
 	text := oneLine(event.Text)
 	if event.Kind == "final" {
 		if lines, ok := reviewAnswerDisplayLines(event.Text); ok {
