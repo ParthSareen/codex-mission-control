@@ -80,6 +80,7 @@ func TestFleetEntriesKeepStableOrderAcrossRefresh(t *testing.T) {
 
 func TestUIStateRoundTrip(t *testing.T) {
 	home := t.TempDir()
+	finalAt := time.Date(2026, 5, 6, 22, 10, 30, 123456789, time.UTC)
 	m := New(home, 10)
 	m.themeIdx = 3
 	m.mode = modeFocus
@@ -87,6 +88,7 @@ func TestUIStateRoundTrip(t *testing.T) {
 	m.commsScroll = 7
 	m.commsCursor = 2
 	m.threads = []codex.Thread{{ID: "thread-a"}}
+	m.seenFinals["thread-a"] = finalAt
 	if err := m.saveUIState(); err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +108,35 @@ func TestUIStateRoundTrip(t *testing.T) {
 	}
 	if restored.restoreID != "thread-a" {
 		t.Fatalf("restoreID = %q, want thread-a", restored.restoreID)
+	}
+	if got := restored.seenFinals["thread-a"]; !got.Equal(finalAt) {
+		t.Fatalf("seen final = %v, want %v", got, finalAt)
+	}
+}
+
+func TestMarkSelectedSeenReportsChange(t *testing.T) {
+	finalAt := time.Date(2026, 5, 6, 22, 10, 30, 0, time.UTC)
+	m := Model{
+		seenFinals: map[string]time.Time{},
+		threads: []codex.Thread{
+			{
+				ID: "thread-a",
+				Summary: codex.Summary{
+					LastFinalAt: finalAt,
+				},
+			},
+		},
+	}
+
+	if changed := m.markSelectedSeen(); !changed {
+		t.Fatal("first markSelectedSeen returned false, want true")
+	}
+	if changed := m.markSelectedSeen(); changed {
+		t.Fatal("unchanged markSelectedSeen returned true, want false")
+	}
+	m.threads[0].Summary.LastFinalAt = finalAt.Add(time.Second)
+	if changed := m.markSelectedSeen(); !changed {
+		t.Fatal("newer final markSelectedSeen returned false, want true")
 	}
 }
 

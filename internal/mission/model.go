@@ -101,15 +101,20 @@ type diffDoneMsg struct {
 	err error
 }
 
+type uiStateSavedMsg struct {
+	err error
+}
+
 type persistedUIState struct {
-	Theme          string    `json:"theme"`
-	ThemeIndex     int       `json:"theme_index"`
-	SelectedThread string    `json:"selected_thread"`
-	Mode           string    `json:"mode"`
-	Focus          string    `json:"focus"`
-	CommsScroll    int       `json:"comms_scroll"`
-	CommsCursor    int       `json:"comms_cursor"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	Theme          string            `json:"theme"`
+	ThemeIndex     int               `json:"theme_index"`
+	SelectedThread string            `json:"selected_thread"`
+	Mode           string            `json:"mode"`
+	Focus          string            `json:"focus"`
+	CommsScroll    int               `json:"comms_scroll"`
+	CommsCursor    int               `json:"comms_cursor"`
+	SeenFinals     map[string]string `json:"seen_finals,omitempty"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 func New(codexHome string, limit int) Model {
@@ -198,11 +203,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetCommsPosition()
 		}
 		m.events = m.selectedEvents()
+		seenChanged := false
 		if m.mode == modeFocus {
-			m.markSelectedSeen()
+			seenChanged = m.markSelectedSeen()
 		}
 		m.lastUpdate = time.Now()
 		m.err = ""
+		if seenChanged {
+			return m, saveUIStateCmd(m)
+		}
 		return m, nil
 
 	case resumeDoneMsg:
@@ -239,6 +248,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, refreshCmd(m)
 
+	case uiStateSavedMsg:
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.missionMode != missionOff {
 			next, cmd := m.handleMissionKey(msg)
@@ -262,10 +274,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func persistAfterUpdate(model tea.Model, cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	if m, ok := model.(Model); ok {
-		_ = m.saveUIState()
-		return m, cmd
+		return m, tea.Batch(cmd, saveUIStateCmd(m))
 	}
 	return model, cmd
+}
+
+func saveUIStateCmd(m Model) tea.Cmd {
+	return func() tea.Msg {
+		return uiStateSavedMsg{err: m.saveUIState()}
+	}
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1022,15 +1039,20 @@ func (m Model) missionDirOptions() []string {
 	return dirs
 }
 
-func (m *Model) markSelectedSeen() {
+func (m *Model) markSelectedSeen() bool {
 	if m.seenFinals == nil {
 		m.seenFinals = make(map[string]time.Time)
 	}
 	thread := m.selectedThread()
 	if thread.ID == "" || thread.Summary.LastFinalAt.IsZero() {
-		return
+		return false
+	}
+	current := m.seenFinals[thread.ID]
+	if !current.IsZero() && !thread.Summary.LastFinalAt.After(current) {
+		return false
 	}
 	m.seenFinals[thread.ID] = thread.Summary.LastFinalAt
+	return true
 }
 
 func (m Model) needsReview(thread codex.Thread) bool {
@@ -1120,6 +1142,21 @@ func (m *Model) loadUIState() {
 	m.commsScroll = max(0, state.CommsScroll)
 	m.commsCursor = max(0, state.CommsCursor)
 	m.restoreID = state.SelectedThread
+	for id, value := range state.SeenFinals {
+		if strings.TrimSpace(id) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		seenAt, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			seenAt, err = time.Parse(time.RFC3339, value)
+		}
+		if err == nil && !seenAt.IsZero() {
+			if m.seenFinals == nil {
+				m.seenFinals = make(map[string]time.Time)
+			}
+			m.seenFinals[id] = seenAt
+		}
+	}
 }
 
 func (m Model) saveUIState() error {
@@ -1136,6 +1173,7 @@ func (m Model) saveUIState() error {
 		Focus:          focusTargetName(m.focus),
 		CommsScroll:    max(0, m.commsScroll),
 		CommsCursor:    max(0, m.commsCursor),
+		SeenFinals:     encodeSeenFinals(m.seenFinals),
 		UpdatedAt:      time.Now(),
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -1145,7 +1183,54 @@ func (m Model) saveUIState() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return writeFileAtomic(path, append(data, '\n'), 0o644)
+}
+
+func encodeSeenFinals(seenFinals map[string]time.Time) map[string]string {
+	if len(seenFinals) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(seenFinals))
+	for id, seenAt := range seenFinals {
+		if strings.TrimSpace(id) == "" || seenAt.IsZero() {
+			continue
+		}
+		out[id] = seenAt.Format(time.RFC3339Nano)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func screenModeName(mode screenMode) string {

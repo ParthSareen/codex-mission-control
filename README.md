@@ -57,13 +57,14 @@ q              quit
 
 Themes: green, cyan, amber, blue, purple, red, white.
 
-Mission Control remembers the last theme, selected thread, pane, and comms
-position in `~/.codex/mission-control/state.json`.
+Mission Control remembers the last theme, selected thread, pane, comms
+position, and seen final timestamps in
+`~/.codex/mission-control/state.json`.
 
 Escalation requests, such as tool calls with
 `sandbox_permissions: "require_escalated"`, render as `ALERT`. Threads with a
-fresh final answer that you have not selected in the current TUI session render
-as red `REVIEW` until opened.
+fresh final answer that you have not selected render as red `REVIEW` until
+opened.
 
 Launches prefer Ghostty on macOS. If Mission Control is already running inside
 Ghostty, `r` opens a right split with the selected thread's cwd and `codex
