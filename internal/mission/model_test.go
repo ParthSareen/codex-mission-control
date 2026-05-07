@@ -259,6 +259,28 @@ func TestCodexNewMissionShellLineQuotesCWDAndPrompt(t *testing.T) {
 	}
 }
 
+func TestCodexReviewShellLineRunsReview(t *testing.T) {
+	line := codexReviewShellLine("/tmp/review tree")
+
+	for _, want := range []string{
+		"cd '/tmp/review tree'",
+		"codex '/review'",
+		"printf '\\n[codex exited - press enter or close this terminal]\\n'",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("review shell line %q does not contain %q", line, want)
+		}
+	}
+}
+
+func TestReviewWorktreeDirSanitizesBranch(t *testing.T) {
+	got := reviewWorktreeDir("/Users/me/Documents/repos/project", "origin/feature/review_this")
+	want := "/Users/me/Documents/repos/project-feature-review_this"
+	if got != want {
+		t.Fatalf("review worktree dir = %q, want %q", got, want)
+	}
+}
+
 func TestSelectedMissionDirAcceptsTypedPath(t *testing.T) {
 	dir := t.TempDir()
 	m := New("", 10)
@@ -305,11 +327,39 @@ func TestNewMissionCreatesSelectedRepoDir(t *testing.T) {
 	if !dirExists(want) {
 		t.Fatalf("created dir missing: %s", want)
 	}
-	if m.missionMode != missionDescribe {
-		t.Fatalf("mission mode = %v, want describe", m.missionMode)
+	if m.missionMode != missionSelectKind {
+		t.Fatalf("mission mode = %v, want select kind", m.missionMode)
 	}
 	if m.missionDir != want {
 		t.Fatalf("mission dir = %q, want %q", m.missionDir, want)
+	}
+}
+
+func TestNewMissionReviewBranchFlow(t *testing.T) {
+	dir := t.TempDir()
+	m := New("", 10)
+	m.startMission()
+	m.missionInput.SetValue(dir)
+
+	next, _ := m.handleMissionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.missionMode != missionSelectKind {
+		t.Fatalf("mission mode = %v, want select kind", m.missionMode)
+	}
+
+	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	if !m.selectedMissionKind().review {
+		t.Fatal("selected mission kind is not review")
+	}
+
+	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.missionMode != missionReviewBranch {
+		t.Fatalf("mission mode = %v, want review branch", m.missionMode)
+	}
+	if m.missionInput.Prompt != "BRANCH> " {
+		t.Fatalf("mission prompt = %q, want BRANCH> ", m.missionInput.Prompt)
 	}
 }
 
@@ -324,6 +374,28 @@ func TestMissionDirFilterAllowsJAndKTyping(t *testing.T) {
 
 	if got := m.missionInput.Value(); got != "jk" {
 		t.Fatalf("mission filter value = %q, want jk", got)
+	}
+}
+
+func TestParseGitStatus(t *testing.T) {
+	var snapshot gitSnapshot
+	parseGitBranchLine(&snapshot, "## main...origin/main [ahead 2, behind 1]")
+	for _, line := range []string{
+		"M  staged.go",
+		" M unstaged.go",
+		"?? new.go",
+	} {
+		parseGitStatusLine(&snapshot, line)
+	}
+
+	if snapshot.Branch != "main" || snapshot.Upstream != "origin/main" {
+		t.Fatalf("branch/upstream = %q/%q, want main/origin/main", snapshot.Branch, snapshot.Upstream)
+	}
+	if snapshot.Ahead != 2 || snapshot.Behind != 1 {
+		t.Fatalf("ahead/behind = %d/%d, want 2/1", snapshot.Ahead, snapshot.Behind)
+	}
+	if snapshot.Staged != 1 || snapshot.Unstaged != 1 || snapshot.Untracked != 1 {
+		t.Fatalf("dirty counts = %d/%d/%d, want 1/1/1", snapshot.Staged, snapshot.Unstaged, snapshot.Untracked)
 	}
 }
 

@@ -39,7 +39,9 @@ type missionMode int
 const (
 	missionOff missionMode = iota
 	missionSelectDir
+	missionSelectKind
 	missionDescribe
+	missionReviewBranch
 )
 
 type Model struct {
@@ -70,16 +72,23 @@ type Model struct {
 	askMode bool
 	ask     textinput.Model
 
-	missionMode      missionMode
-	missionInput     textinput.Model
-	missionDir       string
-	missionDirCursor int
+	missionMode       missionMode
+	missionInput      textinput.Model
+	missionDir        string
+	missionDirCursor  int
+	missionKindCursor int
+	git               gitSnapshot
 }
 
 type refreshMsg struct {
 	threads []codex.Thread
 	events  []codex.Event
+	git     gitSnapshot
 	err     error
+}
+
+type gitStatusMsg struct {
+	git gitSnapshot
 }
 
 type tickMsg time.Time
@@ -108,6 +117,26 @@ type uiStateSavedMsg struct {
 type missionDirChoice struct {
 	dir    string
 	create bool
+}
+
+type missionKindChoice struct {
+	label       string
+	description string
+	review      bool
+}
+
+type gitSnapshot struct {
+	CWD       string
+	Branch    string
+	Upstream  string
+	Ahead     int
+	Behind    int
+	Staged    int
+	Unstaged  int
+	Untracked int
+	Entries   []string
+	Err       string
+	Loaded    bool
 }
 
 type persistedUIState struct {
@@ -166,6 +195,7 @@ func (m Model) RefreshNow() Model {
 	m.observeThreadOrder()
 	m.restorePreferredSelection("")
 	m.events = m.selectedEvents()
+	m.git = loadGitSnapshot(m.selectedThread().CWD)
 	m.lastUpdate = time.Now()
 	return m
 }
@@ -208,6 +238,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetCommsPosition()
 		}
 		m.events = m.selectedEvents()
+		m.git = msg.git
 		seenChanged := false
 		if m.mode == modeFocus {
 			seenChanged = m.markSelectedSeen()
@@ -256,12 +287,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case uiStateSavedMsg:
 		return m, nil
 
+	case gitStatusMsg:
+		if msg.git.CWD == normalizeDir(m.selectedThread().CWD) {
+			m.git = msg.git
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.missionMode != missionOff {
 			next, cmd := m.handleMissionKey(msg)
 			return persistAfterUpdate(next, cmd)
 		}
+		prevCWD := normalizeDir(m.selectedThread().CWD)
 		next, cmd := m.handleKey(msg)
+		if nextModel, ok := next.(Model); ok && normalizeDir(nextModel.selectedThread().CWD) != prevCWD {
+			nextModel.git = gitSnapshot{CWD: normalizeDir(nextModel.selectedThread().CWD)}
+			return persistAfterUpdate(nextModel, tea.Batch(cmd, gitStatusCmd(nextModel.selectedThread())))
+		}
 		return persistAfterUpdate(next, cmd)
 
 	case tea.MouseMsg:
@@ -485,6 +527,7 @@ func (m *Model) startMission() {
 	m.missionMode = missionSelectDir
 	m.missionDir = ""
 	m.missionDirCursor = 0
+	m.missionKindCursor = 0
 	m.missionInput.Prompt = "DIR> "
 	m.missionInput.Placeholder = "Filter recent dirs or type a directory path..."
 	m.missionInput.SetValue("")
@@ -498,9 +541,23 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c":
 		m.cancelMission()
 		return m, nil
+	case "r":
+		if m.missionMode == missionSelectKind {
+			m.startMissionReviewBranch()
+			return m, textinput.Blink
+		}
+	case "s":
+		if m.missionMode == missionSelectKind {
+			m.startMissionDescribe()
+			return m, textinput.Blink
+		}
 	case "down", "ctrl+j", "ctrl+n":
 		if m.missionMode == missionSelectDir {
 			m.moveMissionDir(1)
+			return m, nil
+		}
+		if m.missionMode == missionSelectKind {
+			m.moveMissionKind(1)
 			return m, nil
 		}
 	case "up", "ctrl+k", "ctrl+p":
@@ -508,14 +565,26 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveMissionDir(-1)
 			return m, nil
 		}
+		if m.missionMode == missionSelectKind {
+			m.moveMissionKind(-1)
+			return m, nil
+		}
 	case "home":
 		if m.missionMode == missionSelectDir {
 			m.missionDirCursor = 0
 			return m, nil
 		}
+		if m.missionMode == missionSelectKind {
+			m.missionKindCursor = 0
+			return m, nil
+		}
 	case "end":
 		if m.missionMode == missionSelectDir {
 			m.missionDirCursor = max(0, len(m.missionDirChoices())-1)
+			return m, nil
+		}
+		if m.missionMode == missionSelectKind {
+			m.missionKindCursor = max(0, len(missionKindChoices())-1)
 			return m, nil
 		}
 	case "enter":
@@ -533,13 +602,27 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "created workspace " + choice.dir
 			}
 			m.missionDir = choice.dir
-			m.missionMode = missionDescribe
-			m.missionInput.Prompt = "MISSION> "
-			m.missionInput.Placeholder = "Describe the mission..."
-			m.missionInput.SetValue("")
-			m.missionInput.Width = max(20, m.width-10)
-			m.missionInput.Focus()
+			m.startMissionKind()
+			return m, nil
+		}
+		if m.missionMode == missionSelectKind {
+			choice := m.selectedMissionKind()
+			if choice.review {
+				m.startMissionReviewBranch()
+			} else {
+				m.startMissionDescribe()
+			}
 			return m, textinput.Blink
+		}
+		if m.missionMode == missionReviewBranch {
+			branch := strings.TrimSpace(m.missionInput.Value())
+			dir := m.missionDir
+			m.cancelMission()
+			if branch == "" {
+				m.status = "review launch canceled: empty branch"
+				return m, nil
+			}
+			return m, launchReviewBranchMissionCmd(dir, branch)
 		}
 		prompt := strings.TrimSpace(m.missionInput.Value())
 		dir := m.missionDir
@@ -549,6 +632,10 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, launchNewMissionCmd(dir, prompt)
+	}
+
+	if m.missionMode == missionSelectKind {
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -563,8 +650,34 @@ func (m *Model) cancelMission() {
 	m.missionMode = missionOff
 	m.missionDir = ""
 	m.missionDirCursor = 0
+	m.missionKindCursor = 0
 	m.missionInput.Blur()
 	m.missionInput.SetValue("")
+}
+
+func (m *Model) startMissionKind() {
+	m.missionMode = missionSelectKind
+	m.missionKindCursor = 0
+	m.missionInput.Blur()
+	m.missionInput.SetValue("")
+}
+
+func (m *Model) startMissionDescribe() {
+	m.missionMode = missionDescribe
+	m.missionInput.Prompt = "MISSION> "
+	m.missionInput.Placeholder = "Describe the mission..."
+	m.missionInput.SetValue("")
+	m.missionInput.Width = max(20, m.width-10)
+	m.missionInput.Focus()
+}
+
+func (m *Model) startMissionReviewBranch() {
+	m.missionMode = missionReviewBranch
+	m.missionInput.Prompt = "BRANCH> "
+	m.missionInput.Placeholder = "Paste branch/ref to review..."
+	m.missionInput.SetValue("")
+	m.missionInput.Width = max(20, m.width-10)
+	m.missionInput.Focus()
 }
 
 func (m *Model) moveMissionDir(delta int) {
@@ -583,6 +696,15 @@ func (m *Model) clampMissionDirCursor() {
 		return
 	}
 	m.missionDirCursor = max(0, min(len(choices)-1, m.missionDirCursor))
+}
+
+func (m *Model) moveMissionKind(delta int) {
+	choices := missionKindChoices()
+	if len(choices) == 0 {
+		m.missionKindCursor = 0
+		return
+	}
+	m.missionKindCursor = max(0, min(len(choices)-1, m.missionKindCursor+delta))
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -686,10 +808,18 @@ func refreshCmd(m Model) tea.Cmd {
 			selected = 0
 		}
 		var events []codex.Event
+		var git gitSnapshot
 		if len(threads) > 0 {
 			events = m.store.LoadThreadEvents(threads[selected], 260)
+			git = loadGitSnapshot(threads[selected].CWD)
 		}
-		return refreshMsg{threads: threads, events: events}
+		return refreshMsg{threads: threads, events: events, git: git}
+	}
+}
+
+func gitStatusCmd(thread codex.Thread) tea.Cmd {
+	return func() tea.Msg {
+		return gitStatusMsg{git: loadGitSnapshot(thread.CWD)}
 	}
 }
 
@@ -746,6 +876,52 @@ func launchNewMissionCmd(cwd, prompt string) tea.Cmd {
 		}
 		return launchDoneMsg{status: "launched new mission"}
 	}
+}
+
+func launchReviewBranchMissionCmd(repoDir, branch string) tea.Cmd {
+	return func() tea.Msg {
+		worktreeDir, err := createReviewWorktree(repoDir, branch)
+		if err != nil {
+			return launchDoneMsg{err: err}
+		}
+		line := codexReviewShellLine(worktreeDir)
+		if err := launchCodexDetached(worktreeDir, "codex-review", line); err != nil {
+			return launchDoneMsg{err: err}
+		}
+		return launchDoneMsg{status: "launched review branch in " + worktreeDir}
+	}
+}
+
+func createReviewWorktree(repoDir, branch string) (string, error) {
+	repoDir = normalizeDir(repoDir)
+	if !dirExists(repoDir) {
+		return "", fmt.Errorf("review repo dir not found: %s", repoDir)
+	}
+	branch = normalizeBranchInput(branch)
+	if branch == "" {
+		return "", fmt.Errorf("empty branch")
+	}
+	root, err := gitOutput(repoDir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("not a git repo: %s", repoDir)
+	}
+	worktreeDir := reviewWorktreeDir(root, branch)
+	if dirExists(worktreeDir) {
+		if _, err := gitOutput(worktreeDir, "rev-parse", "--is-inside-work-tree"); err != nil {
+			return "", fmt.Errorf("review worktree path already exists and is not a git worktree: %s", worktreeDir)
+		}
+		return worktreeDir, nil
+	}
+	cmd := exec.Command("git", "-C", root, "worktree", "add", worktreeDir, branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("git worktree add: %s", msg)
+	}
+	return worktreeDir, nil
 }
 
 func launchCodexDetached(cwd, title, line string) error {
@@ -833,8 +1009,142 @@ func codexNewMissionShellLine(cwd, prompt string) string {
 	return strings.Join(parts, " ")
 }
 
+func codexReviewShellLine(cwd string) string {
+	return codexNewMissionShellLine(cwd, "/review")
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func gitOutput(cwd string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", cwd}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func loadGitSnapshot(cwd string) gitSnapshot {
+	cwd = normalizeDir(cwd)
+	snapshot := gitSnapshot{CWD: cwd, Loaded: true}
+	if cwd == "" {
+		snapshot.Err = "no cwd"
+		return snapshot
+	}
+	if !dirExists(cwd) {
+		snapshot.Err = "cwd not found"
+		return snapshot
+	}
+	out, err := gitOutput(cwd, "status", "--short", "--branch")
+	if err != nil {
+		snapshot.Err = err.Error()
+		return snapshot
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for i, line := range lines {
+		if i == 0 && strings.HasPrefix(line, "## ") {
+			parseGitBranchLine(&snapshot, line)
+			continue
+		}
+		parseGitStatusLine(&snapshot, line)
+	}
+	return snapshot
+}
+
+func parseGitBranchLine(snapshot *gitSnapshot, line string) {
+	line = strings.TrimSpace(strings.TrimPrefix(line, "## "))
+	if line == "" {
+		return
+	}
+	meta := ""
+	if idx := strings.Index(line, " ["); idx >= 0 {
+		meta = strings.Trim(line[idx+1:], "[] ")
+		line = strings.TrimSpace(line[:idx])
+	}
+	if idx := strings.Index(line, "..."); idx >= 0 {
+		snapshot.Branch = strings.TrimSpace(line[:idx])
+		snapshot.Upstream = strings.TrimSpace(line[idx+3:])
+	} else {
+		snapshot.Branch = strings.TrimSpace(line)
+	}
+	parseGitAheadBehind(snapshot, meta)
+}
+
+func parseGitAheadBehind(snapshot *gitSnapshot, meta string) {
+	meta = strings.NewReplacer(",", "", "[", "", "]", "").Replace(meta)
+	parts := strings.Fields(meta)
+	for i := 0; i+1 < len(parts); i++ {
+		n, err := strconv.Atoi(parts[i+1])
+		if err != nil {
+			continue
+		}
+		switch parts[i] {
+		case "ahead":
+			snapshot.Ahead = n
+		case "behind":
+			snapshot.Behind = n
+		}
+	}
+}
+
+func parseGitStatusLine(snapshot *gitSnapshot, line string) {
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	if strings.HasPrefix(line, "??") {
+		snapshot.Untracked++
+	} else if len(line) >= 2 {
+		if line[0] != ' ' {
+			snapshot.Staged++
+		}
+		if line[1] != ' ' {
+			snapshot.Unstaged++
+		}
+	}
+	snapshot.Entries = append(snapshot.Entries, strings.TrimSpace(line))
+}
+
+func normalizeBranchInput(branch string) string {
+	branch = strings.TrimSpace(branch)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	branch = strings.TrimPrefix(branch, "refs/remotes/")
+	return branch
+}
+
+func reviewWorktreeDir(repoRoot, branch string) string {
+	repoRoot = normalizeDir(repoRoot)
+	parent := filepath.Dir(repoRoot)
+	repoName := filepath.Base(repoRoot)
+	slug := branchSlug(branch)
+	if slug == "" {
+		slug = "review"
+	}
+	return filepath.Join(parent, repoName+"-"+slug)
+}
+
+func branchSlug(branch string) string {
+	branch = normalizeBranchInput(branch)
+	branch = strings.TrimPrefix(branch, "origin/")
+	var b strings.Builder
+	lastDash := false
+	for _, r := range branch {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteRune('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func commandExists(name string) bool {
@@ -984,6 +1294,28 @@ func (m Model) selectedEvents() []codex.Event {
 
 func (m Model) selectedMissionDir() string {
 	return m.selectedMissionDirChoice().dir
+}
+
+func (m Model) selectedMissionKind() missionKindChoice {
+	choices := missionKindChoices()
+	if len(choices) == 0 || m.missionKindCursor < 0 || m.missionKindCursor >= len(choices) {
+		return missionKindChoice{}
+	}
+	return choices[m.missionKindCursor]
+}
+
+func missionKindChoices() []missionKindChoice {
+	return []missionKindChoice{
+		{
+			label:       "STANDARD MISSION",
+			description: "Describe an objective and launch Codex in this workspace.",
+		},
+		{
+			label:       "REVIEW BRANCH",
+			description: "Create a git worktree from a pasted branch/ref, then run /review.",
+			review:      true,
+		},
+	}
 }
 
 func (m Model) selectedMissionDirChoice() missionDirChoice {

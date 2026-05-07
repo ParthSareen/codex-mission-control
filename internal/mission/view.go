@@ -126,11 +126,17 @@ func (m Model) renderMain(height int) string {
 		}
 	}
 	comms := m.panel(rightW, topH, commsTitle, m.renderComms(rightW-2, topH-3), m.focus == focusComms)
-	teleW := rightW / 2
-	toolW := rightW - teleW
+	teleW := max(22, rightW/4)
+	gitW := max(26, rightW/3)
+	if teleW+gitW > rightW-22 {
+		teleW = rightW / 3
+		gitW = rightW / 3
+	}
+	toolW := rightW - teleW - gitW
 	telemetry := m.panel(teleW, bottomH, "TELEMETRY", m.renderTelemetry(teleW-2, bottomH-3), false)
+	git := m.panel(gitW, bottomH, "GIT STATUS", m.renderGitStatus(gitW-2, bottomH-3), false)
 	tools := m.panel(toolW, bottomH, "TOOL TRACE", m.renderToolTrace(toolW-2, bottomH-3), false)
-	bottom := lipgloss.JoinHorizontal(lipgloss.Top, telemetry, tools)
+	bottom := lipgloss.JoinHorizontal(lipgloss.Top, telemetry, git, tools)
 	right := lipgloss.JoinVertical(lipgloss.Left, comms, bottom)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
@@ -182,6 +188,27 @@ func (m Model) renderMissionContent(width, height int) string {
 			label := fmt.Sprintf("%s %-6s %-22s %s", prefix, tag, truncate(filepathBase(choice.dir), 22), truncate(choice.dir, max(1, width-34)))
 			rows = append(rows, style.Render(fit(label, width)))
 		}
+	case missionSelectKind:
+		rows = append(rows,
+			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("SELECT MISSION TYPE", width)),
+			kv("cwd", m.missionDir, width),
+			"",
+		)
+		choices := missionKindChoices()
+		remaining := max(0, height-len(rows))
+		for i, choice := range choices {
+			if i >= remaining {
+				break
+			}
+			style := lipgloss.NewStyle().Foreground(t.text)
+			prefix := " "
+			if i == m.missionKindCursor {
+				prefix = ">"
+				style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+			}
+			label := fmt.Sprintf("%s %-18s %s", prefix, choice.label, truncate(choice.description, max(1, width-22)))
+			rows = append(rows, style.Render(fit(label, width)))
+		}
 	case missionDescribe:
 		rows = append(rows,
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("DESCRIBE OBJECTIVE", width)),
@@ -190,6 +217,16 @@ func (m Model) renderMissionContent(width, height int) string {
 			fit(m.missionInput.View(), width),
 			"",
 			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter launches a new Codex session in Ghostty/tmux; esc cancels", width)),
+		)
+	case missionReviewBranch:
+		rows = append(rows,
+			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("REVIEW BRANCH", width)),
+			kv("repo", m.missionDir, width),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("creates a sibling worktree, then launches Codex with /review", width)),
+			"",
+			fit(m.missionInput.View(), width),
+			"",
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter creates worktree and launches review; esc cancels", width)),
 		)
 	default:
 		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("Mission console offline.", width)))
@@ -445,6 +482,67 @@ func (m Model) renderTelemetry(width, height int) string {
 	return strings.Join(rows, "\n")
 }
 
+func (m Model) renderGitStatus(width, height int) string {
+	t := m.theme()
+	selectedCWD := normalizeDir(m.selectedThread().CWD)
+	if selectedCWD == "" {
+		return lipgloss.NewStyle().Foreground(t.dim).Render("No workspace.")
+	}
+	git := m.git
+	if git.CWD != selectedCWD {
+		return lipgloss.NewStyle().Foreground(t.dim).Render("Scanning...")
+	}
+	if git.Err != "" {
+		msg := oneLine(git.Err)
+		if strings.Contains(msg, "not a git repository") || strings.Contains(msg, "not a git repo") {
+			msg = "Not a git repo."
+		}
+		return lipgloss.NewStyle().Foreground(t.dim).Render(fit(msg, width))
+	}
+	branch := fallback(git.Branch, "unknown")
+	if git.Upstream != "" {
+		branch += " -> " + git.Upstream
+	}
+	rows := []string{
+		kv("branch", truncate(branch, max(1, width-8)), width),
+	}
+	sync := "in sync"
+	if git.Upstream == "" {
+		sync = "no upstream"
+	}
+	if git.Ahead > 0 || git.Behind > 0 {
+		parts := []string{}
+		if git.Ahead > 0 {
+			parts = append(parts, fmt.Sprintf("ahead %d", git.Ahead))
+		}
+		if git.Behind > 0 {
+			parts = append(parts, fmt.Sprintf("behind %d", git.Behind))
+		}
+		sync = strings.Join(parts, " ")
+	}
+	rows = append(rows, kv("remote", sync, width))
+	dirty := git.Staged + git.Unstaged + git.Untracked
+	dirtyText := "clean"
+	if dirty > 0 {
+		dirtyText = fmt.Sprintf("S%d U%d ?%d", git.Staged, git.Unstaged, git.Untracked)
+	}
+	style := lipgloss.NewStyle().Foreground(t.primary)
+	if dirty > 0 {
+		style = lipgloss.NewStyle().Foreground(t.warn).Bold(true)
+	}
+	rows = append(rows, style.Render(kv("dirty", dirtyText, width)))
+	for _, entry := range git.Entries {
+		if len(rows) >= height {
+			break
+		}
+		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit(truncate(entry, width), width)))
+	}
+	if len(rows) > height {
+		rows = rows[:height]
+	}
+	return strings.Join(rows, "\n")
+}
+
 func (m Model) renderToolTrace(width, height int) string {
 	t := m.theme()
 	var tools []codex.Event
@@ -514,8 +612,13 @@ func (m Model) renderAskBar() string {
 func (m Model) renderMissionStatus() string {
 	t := m.theme()
 	text := "new mission: type filter/path/new repo  up/down select  enter continue  esc cancel"
-	if m.missionMode == missionDescribe {
+	switch m.missionMode {
+	case missionSelectKind:
+		text = "new mission: choose type  r review  s standard  up/down select  enter continue  esc cancel"
+	case missionDescribe:
 		text = "new mission: describe objective  enter launch  esc cancel"
+	case missionReviewBranch:
+		text = "new mission: paste branch/ref  enter create worktree + /review  esc cancel"
 	}
 	if m.status != "" {
 		text = m.status + "   " + text
