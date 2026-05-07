@@ -16,7 +16,7 @@ CLI, starting with `codex resume <thread-id>`.
 Install:
 
 ```sh
-go install github.com/parthsareen/codex-mission-control/cmd/cmc@v0.1.2
+go install github.com/parthsareen/codex-mission-control/cmd/cmc@v0.1.3
 ```
 
 ```sh
