@@ -587,17 +587,14 @@ func (m Model) commsLineStyle(line commsLine, base lipgloss.Style) lipgloss.Styl
 	switch line.tone {
 	case "review-header":
 		return base.Foreground(t.warn).Bold(true)
-	case "review-critical":
-		return base.Foreground(t.err).Bold(true)
-	case "review-warning":
-		return base.Foreground(t.warn).Bold(true)
-	case "review-note":
-		return base.Foreground(t.accent).Bold(true)
 	case "review-body":
 		return base.Foreground(t.dim)
 	case "review-overall":
 		return base.Foreground(t.primary)
 	default:
+		if color, ok := reviewPriorityColor(line.tone); ok {
+			return base.Foreground(color).Bold(true)
+		}
 		return base
 	}
 }

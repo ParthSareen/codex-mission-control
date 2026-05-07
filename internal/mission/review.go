@@ -18,7 +18,7 @@ type reviewFinding struct {
 	Title           string             `json:"title"`
 	Body            string             `json:"body"`
 	ConfidenceScore float64            `json:"confidence_score"`
-	Priority        int                `json:"priority"`
+	Priority        *int               `json:"priority"`
 	CodeLocation    reviewCodeLocation `json:"code_location"`
 }
 
@@ -111,16 +111,13 @@ func reviewSummaryText(text string) string {
 }
 
 func reviewFindingHeadline(finding reviewFinding) string {
-	priority := finding.Priority
+	priority, hasPriority := reviewFindingPriority(finding)
 	title := stripPriorityPrefix(oneLine(finding.Title))
-	if priority <= 0 {
-		priority = priorityFromTitle(finding.Title)
-	}
 	if title == "" {
 		title = "Untitled finding"
 	}
 	priorityLabel := "P?"
-	if priority > 0 {
+	if hasPriority {
 		priorityLabel = fmt.Sprintf("P%d", priority)
 	}
 
@@ -132,9 +129,9 @@ func reviewFindingHeadline(finding reviewFinding) string {
 }
 
 func reviewFindingTone(finding reviewFinding) string {
-	priority := finding.Priority
-	if priority <= 0 {
-		priority = priorityFromTitle(finding.Title)
+	priority, ok := reviewFindingPriority(finding)
+	if !ok {
+		return "review-note"
 	}
 	switch {
 	case priority <= 1:
@@ -144,6 +141,13 @@ func reviewFindingTone(finding reviewFinding) string {
 	default:
 		return "review-note"
 	}
+}
+
+func reviewFindingPriority(finding reviewFinding) (int, bool) {
+	if finding.Priority != nil {
+		return *finding.Priority, true
+	}
+	return priorityFromTitle(finding.Title)
 }
 
 func reviewLocation(location reviewCodeLocation) string {
@@ -193,10 +197,10 @@ func stripPriorityPrefix(title string) string {
 	return title
 }
 
-func priorityFromTitle(title string) int {
+func priorityFromTitle(title string) (int, bool) {
 	title = strings.TrimSpace(title)
 	if len(title) < 3 || title[0] != '[' || title[1] != 'P' || title[2] < '0' || title[2] > '9' {
-		return 0
+		return 0, false
 	}
-	return int(title[2] - '0')
+	return int(title[2] - '0'), true
 }

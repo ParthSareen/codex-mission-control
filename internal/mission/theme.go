@@ -23,3 +23,16 @@ var themes = []theme{
 	{"red", lipgloss.Color("196"), lipgloss.Color("88"), lipgloss.Color("52"), lipgloss.Color("0"), lipgloss.Color("203"), lipgloss.Color("220"), lipgloss.Color("196"), lipgloss.Color("231")},
 	{"white", lipgloss.Color("255"), lipgloss.Color("245"), lipgloss.Color("238"), lipgloss.Color("0"), lipgloss.Color("250"), lipgloss.Color("220"), lipgloss.Color("196"), lipgloss.Color("255")},
 }
+
+func reviewPriorityColor(tone string) (lipgloss.Color, bool) {
+	switch tone {
+	case "review-critical":
+		return lipgloss.Color("205"), true // hot rose: P0/P1
+	case "review-warning":
+		return lipgloss.Color("45"), true // electric cyan: P2
+	case "review-note":
+		return lipgloss.Color("147"), true // soft violet: P3+
+	default:
+		return "", false
+	}
+}

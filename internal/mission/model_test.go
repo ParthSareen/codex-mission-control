@@ -360,6 +360,48 @@ func TestCommsPlainLinesFormatsReviewAnswer(t *testing.T) {
 	}
 }
 
+func TestReviewPriorityColorsStandApartFromAmber(t *testing.T) {
+	amber := themes[2]
+	amberColors := map[string]bool{
+		string(amber.primary): true,
+		string(amber.warn):    true,
+		string(amber.accent):  true,
+	}
+	cases := map[string]string{
+		"review-critical": "205",
+		"review-warning":  "45",
+		"review-note":     "147",
+	}
+	for tone, want := range cases {
+		got, ok := reviewPriorityColor(tone)
+		if !ok {
+			t.Fatalf("reviewPriorityColor(%q) ok = false, want true", tone)
+		}
+		if string(got) != want {
+			t.Fatalf("reviewPriorityColor(%q) = %q, want %q", tone, got, want)
+		}
+		if amberColors[string(got)] {
+			t.Fatalf("reviewPriorityColor(%q) = %q, overlaps amber palette", tone, got)
+		}
+	}
+}
+
+func TestReviewFindingToneHandlesP0(t *testing.T) {
+	lines, ok := reviewAnswerDisplayLines(`{"findings":[{"title":"[P0] Breaks launch","body":"Launch is broken.","priority":0}],"overall_correctness":"patch is incorrect"}`)
+	if !ok {
+		t.Fatal("reviewAnswerDisplayLines returned !ok")
+	}
+	if len(lines) < 2 {
+		t.Fatalf("lines len = %d, want at least 2", len(lines))
+	}
+	if lines[1].Tone != "review-critical" {
+		t.Fatalf("P0 tone = %q, want review-critical", lines[1].Tone)
+	}
+	if !strings.Contains(lines[1].Text, "P0 Breaks launch") {
+		t.Fatalf("P0 headline = %q, want P0 Breaks launch", lines[1].Text)
+	}
+}
+
 func TestReviewWorktreeDirSanitizesBranch(t *testing.T) {
 	got := reviewWorktreeDir("/Users/me/Documents/repos/project", "origin/feature/review_this")
 	want := "/Users/me/Documents/repos/project-feature-review_this"
