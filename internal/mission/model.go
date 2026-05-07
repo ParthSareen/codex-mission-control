@@ -19,10 +19,7 @@ import (
 	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
-const (
-	reviewBaseBranch = "main"
-	introSplashTicks = 7
-)
+const reviewBaseBranch = "main"
 
 type screenMode int
 
@@ -252,9 +249,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.tick++
 		cmds := []tea.Cmd{tickEvery(260 * time.Millisecond)}
-		if m.introActive && (!m.introSplash || m.tick >= introSplashTicks) {
-			m.introActive = false
-		}
 		if !m.paused && m.tick%4 == 0 {
 			cmds = append(cmds, refreshCmd(m))
 		}

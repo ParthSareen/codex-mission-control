@@ -121,6 +121,25 @@ func TestUIStateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIntroSplashWaitsForInput(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	if !m.introActive {
+		t.Fatal("introActive = false, want true")
+	}
+
+	next, _ := m.Update(tickMsg(time.Now()))
+	m = next.(Model)
+	if !m.introActive {
+		t.Fatal("introActive dismissed on tick, want it to wait for input")
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = next.(Model)
+	if m.introActive {
+		t.Fatal("introActive = true after keypress, want false")
+	}
+}
+
 func TestMarkSelectedSeenReportsChange(t *testing.T) {
 	finalAt := time.Date(2026, 5, 6, 22, 10, 30, 0, time.UTC)
 	m := Model{

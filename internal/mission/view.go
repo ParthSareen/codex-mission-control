@@ -74,7 +74,8 @@ func (m Model) renderIntro() string {
 		bootStyle.Render("REVIEWS    ") + hotStyle.Render("DECODED"),
 		bootStyle.Render("CONTROL    ") + hotStyle.Render("ONLINE"),
 		"",
-		lipgloss.NewStyle().Foreground(t.dim).Render("INITIALIZING MISSION BUS"),
+		lipgloss.NewStyle().Foreground(t.dim).Render("HOLDING AT MISSION GATE"),
+		lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render("PRESS ANY KEY TO ENTER CONTROL"),
 	}
 	content := strings.Join(rows, "\n")
 	panel := lipgloss.NewStyle().
