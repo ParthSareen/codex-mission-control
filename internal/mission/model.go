@@ -98,6 +98,7 @@ type gitStatusMsg struct {
 type newBranchDoneMsg struct {
 	worktreeDir string
 	copiedPath  string
+	reused      bool
 	copyErr     string
 	err         error
 }
@@ -322,7 +323,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.missionDir = msg.worktreeDir
-		m.status = "created worktree " + msg.copiedPath
+		if msg.reused {
+			m.status = "using worktree " + msg.copiedPath
+		} else {
+			m.status = "created worktree " + msg.copiedPath
+		}
 		if msg.copyErr != "" {
 			m.status += " (copy failed: " + msg.copyErr + ")"
 		}
@@ -1007,32 +1012,41 @@ func launchReviewBranchMissionCmd(repoDir, branch string) tea.Cmd {
 
 func createNewBranchWorktreeCmd(repoDir, name string) tea.Cmd {
 	return func() tea.Msg {
-		worktreeDir, copiedPath, err := createNewBranchWorktree(repoDir, name)
+		worktreeDir, copiedPath, reused, err := createNewBranchWorktree(repoDir, name)
 		if err != nil {
 			return newBranchDoneMsg{err: err}
 		}
 		if err := copyTextNow(copiedPath); err != nil {
-			return newBranchDoneMsg{worktreeDir: worktreeDir, copiedPath: copiedPath, copyErr: err.Error()}
+			return newBranchDoneMsg{worktreeDir: worktreeDir, copiedPath: copiedPath, reused: reused, copyErr: err.Error()}
 		}
-		return newBranchDoneMsg{worktreeDir: worktreeDir, copiedPath: copiedPath}
+		return newBranchDoneMsg{worktreeDir: worktreeDir, copiedPath: copiedPath, reused: reused}
 	}
 }
 
-func createNewBranchWorktree(repoDir, name string) (string, string, error) {
+func createNewBranchWorktree(repoDir, name string) (string, string, bool, error) {
 	repoDir = normalizeDir(repoDir)
 	if !dirExists(repoDir) {
-		return "", "", fmt.Errorf("repo dir not found: %s", repoDir)
+		return "", "", false, fmt.Errorf("repo dir not found: %s", repoDir)
 	}
 	root, err := gitOutput(repoDir, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return "", "", fmt.Errorf("not a git repo: %s", repoDir)
+		return "", "", false, fmt.Errorf("not a git repo: %s", repoDir)
 	}
 	spec, err := newBranchWorktreeSpec(root, name)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
+	}
+	if existing, ok, err := existingWorktreeForBranch(root, spec.branch); err != nil {
+		return "", "", false, fmt.Errorf("git worktree list: %w", err)
+	} else if ok {
+		existing = normalizeDir(existing)
+		if !dirExists(existing) {
+			return "", "", false, fmt.Errorf("branch %s is already registered to missing worktree: %s", spec.branch, existing)
+		}
+		return existing, copiedPathForWorktree(root, existing), true, nil
 	}
 	if dirExists(spec.absPath) {
-		return "", "", fmt.Errorf("worktree path already exists: %s", spec.copiedPath)
+		return "", "", false, fmt.Errorf("worktree path already exists: %s", spec.copiedPath)
 	}
 	cmd := exec.Command("git", "-C", root, "worktree", "add", spec.copiedPath, "-b", spec.branch)
 	out, err := cmd.CombinedOutput()
@@ -1041,9 +1055,9 @@ func createNewBranchWorktree(repoDir, name string) (string, string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", "", fmt.Errorf("git worktree add: %s", msg)
+		return "", "", false, fmt.Errorf("git worktree add: %s", msg)
 	}
-	return spec.absPath, spec.copiedPath, nil
+	return spec.absPath, spec.copiedPath, false, nil
 }
 
 func createReviewWorktree(repoDir, branch string) (string, error) {
@@ -1322,6 +1336,64 @@ func newBranchWorktreeSpec(repoRoot, name string) (newBranchWorktree, error) {
 		copiedPath: copiedPath,
 		absPath:    filepath.Clean(filepath.Join(repoRoot, copiedPath)),
 	}, nil
+}
+
+func existingWorktreeForBranch(repoRoot, branch string) (string, bool, error) {
+	out, err := gitOutput(repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", false, err
+	}
+	path, ok := parseWorktreeForBranch(out, branch)
+	return path, ok, nil
+}
+
+func parseWorktreeForBranch(output, branch string) (string, bool) {
+	branch = normalizeBranchInput(branch)
+	branch = strings.TrimPrefix(branch, "origin/")
+	wantRef := "refs/heads/" + branch
+
+	var worktreePath string
+	var matched bool
+	flush := func() (string, bool) {
+		if worktreePath != "" && matched {
+			return worktreePath, true
+		}
+		return "", false
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if path, ok := flush(); ok {
+				return path, true
+			}
+			worktreePath = ""
+			matched = false
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			worktreePath = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+			continue
+		}
+		if strings.HasPrefix(line, "branch ") {
+			got := strings.TrimSpace(strings.TrimPrefix(line, "branch "))
+			matched = got == branch || got == wantRef
+		}
+	}
+	return flush()
+}
+
+func copiedPathForWorktree(repoRoot, worktreePath string) string {
+	repoRoot = normalizeDir(repoRoot)
+	worktreePath = normalizeDir(worktreePath)
+	parent := filepath.Dir(repoRoot)
+	if filepath.Dir(worktreePath) == parent {
+		return filepath.Join("..", filepath.Base(worktreePath))
+	}
+	if rel, err := filepath.Rel(repoRoot, worktreePath); err == nil {
+		return rel
+	}
+	return worktreePath
 }
 
 func branchSlug(branch string) string {

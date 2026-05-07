@@ -306,6 +306,39 @@ func TestNewBranchWorktreeSpecUsesDuckyPattern(t *testing.T) {
 	}
 }
 
+func TestParseWorktreeForBranchFindsExistingBranch(t *testing.T) {
+	output := strings.Join([]string{
+		"worktree /Users/me/Documents/repos/ollama",
+		"HEAD abc123",
+		"branch refs/heads/main",
+		"",
+		"worktree /Users/me/Documents/repos/ollama-launch-codex-app",
+		"HEAD def456",
+		"branch refs/heads/parth-launch-codex-app",
+		"",
+	}, "\n")
+
+	got, ok := parseWorktreeForBranch(output, "parth-launch-codex-app")
+	if !ok {
+		t.Fatal("parseWorktreeForBranch did not find branch")
+	}
+	want := "/Users/me/Documents/repos/ollama-launch-codex-app"
+	if got != want {
+		t.Fatalf("worktree = %q, want %q", got, want)
+	}
+}
+
+func TestCopiedPathForSiblingWorktreeUsesDuckyPath(t *testing.T) {
+	got := copiedPathForWorktree(
+		"/Users/me/Documents/repos/ollama",
+		"/Users/me/Documents/repos/ollama-launch-codex-app",
+	)
+	want := "../ollama-launch-codex-app"
+	if got != want {
+		t.Fatalf("copied path = %q, want %q", got, want)
+	}
+}
+
 func TestSelectedMissionDirAcceptsTypedPath(t *testing.T) {
 	dir := t.TempDir()
 	m := New("", 10)
