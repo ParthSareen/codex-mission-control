@@ -1,6 +1,8 @@
 package mission
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +74,74 @@ func TestFleetEntriesKeepStableOrderAcrossRefresh(t *testing.T) {
 	}
 	if entries[0].thread.ID != "a" || entries[1].thread.ID != "b" {
 		t.Fatalf("fleet order = [%s %s], want [a b]", entries[0].thread.ID, entries[1].thread.ID)
+	}
+}
+
+func TestUIStateRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	m := New(home, 10)
+	m.themeIdx = 3
+	m.mode = modeFocus
+	m.focus = focusComms
+	m.commsScroll = 7
+	m.commsCursor = 2
+	m.threads = []codex.Thread{{ID: "thread-a"}}
+	if err := m.saveUIState(); err != nil {
+		t.Fatal(err)
+	}
+
+	restored := New(home, 10)
+	if restored.theme().name != "blue" {
+		t.Fatalf("theme = %q, want blue", restored.theme().name)
+	}
+	if restored.mode != modeFocus {
+		t.Fatalf("mode = %v, want focus", restored.mode)
+	}
+	if restored.focus != focusComms {
+		t.Fatalf("focus = %v, want comms", restored.focus)
+	}
+	if restored.commsScroll != 7 || restored.commsCursor != 2 {
+		t.Fatalf("comms position = %d/%d, want 7/2", restored.commsScroll, restored.commsCursor)
+	}
+	if restored.restoreID != "thread-a" {
+		t.Fatalf("restoreID = %q, want thread-a", restored.restoreID)
+	}
+}
+
+func TestRestorePreferredSelectionUsesPersistedThread(t *testing.T) {
+	m := Model{
+		restoreID: "b",
+		threads: []codex.Thread{
+			{ID: "a"},
+			{ID: "b"},
+		},
+	}
+
+	m.restorePreferredSelection("")
+	if got := m.selectedThread().ID; got != "b" {
+		t.Fatalf("selected thread = %q, want b", got)
+	}
+	if m.restoreID != "" {
+		t.Fatalf("restoreID was not consumed: %q", m.restoreID)
+	}
+}
+
+func TestLoadUIStateIgnoresOverviewCommsFocus(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "mission-control", "state.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"mode":"overview","focus":"comms"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(home, 10)
+	if m.mode != modeOverview {
+		t.Fatalf("mode = %v, want overview", m.mode)
+	}
+	if m.focus != focusThreads {
+		t.Fatalf("focus = %v, want threads fallback", m.focus)
 	}
 }
 

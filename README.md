@@ -57,6 +57,9 @@ q              quit
 
 Themes: green, cyan, amber, blue, purple, red, white.
 
+Mission Control remembers the last theme, selected thread, pane, and comms
+position in `~/.codex/mission-control/state.json`.
+
 Escalation requests, such as tool calls with
 `sandbox_permissions: "require_escalated"`, render as `ALERT`. Threads with a
 fresh final answer that you have not selected in the current TUI session render

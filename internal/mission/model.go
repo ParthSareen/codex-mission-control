@@ -1,6 +1,7 @@
 package mission
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,6 +65,7 @@ type Model struct {
 	status      string
 	threadOrder map[string]int
 	nextOrder   int
+	restoreID   string
 
 	askMode bool
 	ask     textinput.Model
@@ -99,6 +101,17 @@ type diffDoneMsg struct {
 	err error
 }
 
+type persistedUIState struct {
+	Theme          string    `json:"theme"`
+	ThemeIndex     int       `json:"theme_index"`
+	SelectedThread string    `json:"selected_thread"`
+	Mode           string    `json:"mode"`
+	Focus          string    `json:"focus"`
+	CommsScroll    int       `json:"comms_scroll"`
+	CommsCursor    int       `json:"comms_cursor"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 func New(codexHome string, limit int) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Ask selected thread, then launch codex resume..."
@@ -112,7 +125,7 @@ func New(codexHome string, limit int) Model {
 	mi.CharLimit = 4000
 	mi.Width = 80
 
-	return Model{
+	model := Model{
 		store:        codex.NewStore(codexHome),
 		limit:        limit,
 		width:        120,
@@ -123,6 +136,8 @@ func New(codexHome string, limit int) Model {
 		ask:          ti,
 		missionInput: mi,
 	}
+	model.loadUIState()
+	return model
 }
 
 func (m Model) WithSize(width, height int) Model {
@@ -139,7 +154,7 @@ func (m Model) RefreshNow() Model {
 	}
 	m.threads = threads
 	m.observeThreadOrder()
-	m.clampSelection()
+	m.restorePreferredSelection("")
 	m.events = m.selectedEvents()
 	m.lastUpdate = time.Now()
 	return m
@@ -178,7 +193,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevID := m.selectedThread().ID
 		m.threads = msg.threads
 		m.observeThreadOrder()
-		m.restoreSelection(prevID)
+		m.restorePreferredSelection(prevID)
 		if m.selectedThread().ID != prevID {
 			m.resetCommsPosition()
 		}
@@ -226,12 +241,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.missionMode != missionOff {
-			return m.handleMissionKey(msg)
+			next, cmd := m.handleMissionKey(msg)
+			return persistAfterUpdate(next, cmd)
 		}
-		return m.handleKey(msg)
+		next, cmd := m.handleKey(msg)
+		return persistAfterUpdate(next, cmd)
 
 	case tea.MouseMsg:
-		return m.handleMouse(msg)
+		next, cmd := m.handleMouse(msg)
+		return persistAfterUpdate(next, cmd)
 	}
 
 	if m.askMode {
@@ -240,6 +258,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+func persistAfterUpdate(model tea.Model, cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m, ok := model.(Model); ok {
+		_ = m.saveUIState()
+		return m, cmd
+	}
+	return model, cmd
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -887,6 +913,15 @@ func (m *Model) restoreSelection(id string) {
 	m.clampSelection()
 }
 
+func (m *Model) restorePreferredSelection(fallbackID string) {
+	id := fallbackID
+	if m.restoreID != "" {
+		id = m.restoreID
+		m.restoreID = ""
+	}
+	m.restoreSelection(id)
+}
+
 func (m Model) selectedThread() codex.Thread {
 	if len(m.threads) == 0 || m.selected < 0 || m.selected >= len(m.threads) {
 		return codex.Thread{}
@@ -1041,6 +1076,120 @@ func (m Model) selectedCommsText() string {
 
 func (m Model) theme() theme {
 	return themes[m.themeIdx%len(themes)]
+}
+
+func (m Model) uiStatePath() string {
+	if strings.TrimSpace(m.store.Home) == "" {
+		return ""
+	}
+	return filepath.Join(m.store.Home, "mission-control", "state.json")
+}
+
+func (m *Model) loadUIState() {
+	path := m.uiStatePath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var state persistedUIState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return
+	}
+	if state.Theme != "" {
+		for i, theme := range themes {
+			if theme.name == state.Theme {
+				m.themeIdx = i
+				break
+			}
+		}
+	} else if state.ThemeIndex >= 0 && state.ThemeIndex < len(themes) {
+		m.themeIdx = state.ThemeIndex
+	}
+	if mode, ok := parseScreenMode(state.Mode); ok {
+		m.mode = mode
+	}
+	if focus, ok := parseFocusTarget(state.Focus); ok {
+		m.focus = focus
+	}
+	if m.mode == modeOverview && m.focus == focusComms {
+		m.focus = focusThreads
+	}
+	m.commsScroll = max(0, state.CommsScroll)
+	m.commsCursor = max(0, state.CommsCursor)
+	m.restoreID = state.SelectedThread
+}
+
+func (m Model) saveUIState() error {
+	path := m.uiStatePath()
+	if path == "" {
+		return nil
+	}
+	selected := m.selectedThread().ID
+	state := persistedUIState{
+		Theme:          m.theme().name,
+		ThemeIndex:     m.themeIdx % len(themes),
+		SelectedThread: selected,
+		Mode:           screenModeName(m.mode),
+		Focus:          focusTargetName(m.focus),
+		CommsScroll:    max(0, m.commsScroll),
+		CommsCursor:    max(0, m.commsCursor),
+		UpdatedAt:      time.Now(),
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func screenModeName(mode screenMode) string {
+	switch mode {
+	case modeFocus:
+		return "focus"
+	default:
+		return "overview"
+	}
+}
+
+func parseScreenMode(name string) (screenMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "overview":
+		return modeOverview, true
+	case "focus":
+		return modeFocus, true
+	default:
+		return modeOverview, false
+	}
+}
+
+func focusTargetName(focus focusTarget) string {
+	switch focus {
+	case focusFleet:
+		return "fleet"
+	case focusComms:
+		return "comms"
+	default:
+		return "threads"
+	}
+}
+
+func parseFocusTarget(name string) (focusTarget, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "threads":
+		return focusThreads, true
+	case "fleet":
+		return focusFleet, true
+	case "comms":
+		return focusComms, true
+	default:
+		return focusThreads, false
+	}
 }
 
 func (m Model) metrics() (active, review, alerts int, newest time.Time) {
