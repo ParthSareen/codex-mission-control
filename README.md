@@ -16,24 +16,24 @@ CLI, starting with `codex resume <thread-id>`.
 Install:
 
 ```sh
-go install github.com/parthsareen/codex-mission-control/cmd/codex-mc@v0.1.0
+go install github.com/parthsareen/codex-mission-control/cmd/cmc@v0.1.1
 ```
 
 ```sh
-go run ./cmd/codex-mc
+go run ./cmd/cmc
 ```
 
 Build:
 
 ```sh
-go build -o ./codex-mc ./cmd/codex-mc
-./codex-mc
+go build -o ./cmc ./cmd/cmc
+./cmc
 ```
 
 Static render for quick checks:
 
 ```sh
-go run ./cmd/codex-mc --snapshot
+go run ./cmd/cmc --snapshot
 ```
 
 ## Keys
