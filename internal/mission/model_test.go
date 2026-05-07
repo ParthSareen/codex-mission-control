@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"codex-mission-control/internal/codex"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestDisplayStatusMarksUnseenFinalForReview(t *testing.T) {
@@ -234,6 +235,40 @@ func TestSelectedMissionDirAcceptsTypedPath(t *testing.T) {
 
 	if got := m.selectedMissionDir(); got != dir {
 		t.Fatalf("selected mission dir = %q, want %q", got, dir)
+	}
+}
+
+func TestMissionDirFilterAllowsJAndKTyping(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	m.startMission()
+
+	next, _ := m.handleMissionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = next.(Model)
+	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = next.(Model)
+
+	if got := m.missionInput.Value(); got != "jk" {
+		t.Fatalf("mission filter value = %q, want jk", got)
+	}
+}
+
+func TestMissionDirFilterArrowsMoveSelection(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	m.threads = []codex.Thread{
+		{ID: "a", CWD: t.TempDir()},
+		{ID: "b", CWD: t.TempDir()},
+	}
+	m.startMission()
+
+	next, _ := m.handleMissionKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	if m.missionDirCursor != 1 {
+		t.Fatalf("mission dir cursor = %d, want 1", m.missionDirCursor)
+	}
+	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyUp})
+	m = next.(Model)
+	if m.missionDirCursor != 0 {
+		t.Fatalf("mission dir cursor = %d, want 0", m.missionDirCursor)
 	}
 }
 

@@ -505,7 +505,7 @@ func (m Model) renderAskBar() string {
 
 func (m Model) renderMissionStatus() string {
 	t := m.theme()
-	text := "new mission: type filter/path  j/k select dir  enter continue  esc cancel"
+	text := "new mission: type filter/path  up/down select dir  enter continue  esc cancel"
 	if m.missionMode == missionDescribe {
 		text = "new mission: describe objective  enter launch  esc cancel"
 	}

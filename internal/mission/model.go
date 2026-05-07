@@ -476,22 +476,22 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c":
 		m.cancelMission()
 		return m, nil
-	case "j", "down":
+	case "down", "ctrl+j", "ctrl+n":
 		if m.missionMode == missionSelectDir {
 			m.moveMissionDir(1)
 			return m, nil
 		}
-	case "k", "up":
+	case "up", "ctrl+k", "ctrl+p":
 		if m.missionMode == missionSelectDir {
 			m.moveMissionDir(-1)
 			return m, nil
 		}
-	case "g", "home":
+	case "home":
 		if m.missionMode == missionSelectDir {
 			m.missionDirCursor = 0
 			return m, nil
 		}
-	case "G", "end":
+	case "end":
 		if m.missionMode == missionSelectDir {
 			m.missionDirCursor = max(0, len(m.filteredMissionDirs())-1)
 			return m, nil
