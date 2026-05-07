@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +62,8 @@ type Model struct {
 	lastUpdate  time.Time
 	err         string
 	status      string
+	threadOrder map[string]int
+	nextOrder   int
 
 	askMode bool
 	ask     textinput.Model
@@ -115,6 +118,7 @@ func New(codexHome string, limit int) Model {
 		width:        120,
 		height:       34,
 		seenFinals:   make(map[string]time.Time),
+		threadOrder:  make(map[string]int),
 		themeIdx:     0,
 		ask:          ti,
 		missionInput: mi,
@@ -134,9 +138,9 @@ func (m Model) RefreshNow() Model {
 		return m
 	}
 	m.threads = threads
+	m.observeThreadOrder()
 	m.clampSelection()
 	m.events = m.selectedEvents()
-	m.markSelectedSeen()
 	m.lastUpdate = time.Now()
 	return m
 }
@@ -173,12 +177,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		prevID := m.selectedThread().ID
 		m.threads = msg.threads
+		m.observeThreadOrder()
 		m.restoreSelection(prevID)
 		if m.selectedThread().ID != prevID {
 			m.resetCommsPosition()
 		}
 		m.events = m.selectedEvents()
-		m.markSelectedSeen()
+		if m.mode == modeFocus {
+			m.markSelectedSeen()
+		}
 		m.lastUpdate = time.Now()
 		m.err = ""
 		return m, nil
@@ -298,7 +305,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selected++
 		m.clampSelection()
 		m.events = m.selectedEvents()
-		m.markSelectedSeen()
+		if m.mode == modeFocus {
+			m.markSelectedSeen()
+		}
 		m.resetCommsPosition()
 		return m, nil
 	case "k", "up":
@@ -313,7 +322,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selected--
 		m.clampSelection()
 		m.events = m.selectedEvents()
-		m.markSelectedSeen()
+		if m.mode == modeFocus {
+			m.markSelectedSeen()
+		}
 		m.resetCommsPosition()
 		return m, nil
 	case "g", "home":
@@ -327,7 +338,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selected = 0
 		m.events = m.selectedEvents()
-		m.markSelectedSeen()
+		if m.mode == modeFocus {
+			m.markSelectedSeen()
+		}
 		m.resetCommsPosition()
 		return m, nil
 	case "G", "end":
@@ -343,7 +356,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selected = len(m.threads) - 1
 		m.clampSelection()
 		m.events = m.selectedEvents()
-		m.markSelectedSeen()
+		if m.mode == modeFocus {
+			m.markSelectedSeen()
+		}
 		m.resetCommsPosition()
 		return m, nil
 	case "pgup", "ctrl+u", "[":
@@ -379,6 +394,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = focusComms
 		return m, nil
 	case "c":
+		m.markSelectedSeen()
 		m.mode = modeFocus
 		m.focus = focusComms
 		return m, nil
@@ -598,7 +614,6 @@ func (m *Model) selectFleetEntry(index int) {
 	}
 	m.selected = entries[index].threadIndex
 	m.events = m.selectedEvents()
-	m.markSelectedSeen()
 	m.resetCommsPosition()
 }
 
@@ -1052,22 +1067,55 @@ type fleetEntry struct {
 	number      int
 }
 
+func (m *Model) observeThreadOrder() {
+	if m.threadOrder == nil {
+		m.threadOrder = make(map[string]int)
+	}
+	for _, thread := range m.threads {
+		if thread.ID == "" {
+			continue
+		}
+		if _, ok := m.threadOrder[thread.ID]; ok {
+			continue
+		}
+		m.threadOrder[thread.ID] = m.nextOrder
+		m.nextOrder++
+	}
+}
+
 func (m Model) fleetEntries() []fleetEntry {
 	statusOrder := []string{"ALERT", "LIVE", "REVIEW", "FINAL", "IDLE"}
 	var entries []fleetEntry
 	for _, status := range statusOrder {
+		var sector []fleetEntry
 		for i, thread := range m.threads {
 			if m.displayStatus(thread) == status {
-				entries = append(entries, fleetEntry{
+				sector = append(sector, fleetEntry{
 					thread:      thread,
 					threadIndex: i,
 					status:      status,
-					number:      len(entries) + 1,
 				})
 			}
 		}
+		sort.SliceStable(sector, func(i, j int) bool {
+			return m.fleetStableOrder(sector[i]) < m.fleetStableOrder(sector[j])
+		})
+		for _, entry := range sector {
+			entry.number = len(entries) + 1
+			entries = append(entries, entry)
+		}
 	}
 	return entries
+}
+
+func (m Model) fleetStableOrder(entry fleetEntry) int {
+	if entry.thread.ID == "" || m.threadOrder == nil {
+		return entry.threadIndex
+	}
+	if order, ok := m.threadOrder[entry.thread.ID]; ok {
+		return order
+	}
+	return entry.threadIndex
 }
 
 func shortID(id string) string {

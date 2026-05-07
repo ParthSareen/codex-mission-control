@@ -30,6 +30,51 @@ func TestDisplayStatusMarksUnseenFinalForReview(t *testing.T) {
 	}
 }
 
+func TestFleetSelectionDoesNotMarkFinalSeen(t *testing.T) {
+	finalAt := time.Now().Add(-2 * time.Minute)
+	m := Model{
+		seenFinals:  map[string]time.Time{},
+		threadOrder: map[string]int{},
+		threads: []codex.Thread{
+			{
+				ID: "review",
+				Summary: codex.Summary{
+					LastKind:    "final",
+					LastFinalAt: finalAt,
+					RecentFinal: true,
+				},
+			},
+		},
+	}
+	m.observeThreadOrder()
+
+	m.selectFleetEntry(0)
+	if got := m.displayStatus(m.selectedThread()); got != "REVIEW" {
+		t.Fatalf("fleet selection status = %q, want REVIEW", got)
+	}
+}
+
+func TestFleetEntriesKeepStableOrderAcrossRefresh(t *testing.T) {
+	finalAt := time.Now().Add(-2 * time.Minute)
+	a := codex.Thread{ID: "a", Summary: codex.Summary{LastKind: "final", LastFinalAt: finalAt, RecentFinal: true}}
+	b := codex.Thread{ID: "b", Summary: codex.Summary{LastKind: "final", LastFinalAt: finalAt, RecentFinal: true}}
+	m := Model{
+		seenFinals:  map[string]time.Time{},
+		threadOrder: map[string]int{},
+		threads:     []codex.Thread{a, b},
+	}
+	m.observeThreadOrder()
+	m.threads = []codex.Thread{b, a}
+
+	entries := m.fleetEntries()
+	if len(entries) != 2 {
+		t.Fatalf("entries len = %d, want 2", len(entries))
+	}
+	if entries[0].thread.ID != "a" || entries[1].thread.ID != "b" {
+		t.Fatalf("fleet order = [%s %s], want [a b]", entries[0].thread.ID, entries[1].thread.ID)
+	}
+}
+
 func TestJumpFleetCallsignUsesFleetOrder(t *testing.T) {
 	now := time.Now()
 	m := Model{
