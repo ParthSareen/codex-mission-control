@@ -290,6 +290,22 @@ func TestReviewWorktreeDirSanitizesBranch(t *testing.T) {
 	}
 }
 
+func TestNewBranchWorktreeSpecUsesDuckyPattern(t *testing.T) {
+	spec, err := newBranchWorktreeSpec("/Users/me/Documents/repos/ollama", "cache/fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.branch != "parth-cache-fix" {
+		t.Fatalf("branch = %q, want parth-cache-fix", spec.branch)
+	}
+	if spec.copiedPath != "../ollama-cache-fix" {
+		t.Fatalf("copied path = %q, want ../ollama-cache-fix", spec.copiedPath)
+	}
+	if spec.absPath != "/Users/me/Documents/repos/ollama-cache-fix" {
+		t.Fatalf("abs path = %q, want /Users/me/Documents/repos/ollama-cache-fix", spec.absPath)
+	}
+}
+
 func TestSelectedMissionDirAcceptsTypedPath(t *testing.T) {
 	dir := t.TempDir()
 	m := New("", 10)
@@ -356,19 +372,44 @@ func TestNewMissionReviewBranchFlow(t *testing.T) {
 		t.Fatalf("mission mode = %v, want select kind", m.missionMode)
 	}
 
-	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyDown})
-	m = next.(Model)
-	if !m.selectedMissionKind().review {
-		t.Fatal("selected mission kind is not review")
-	}
-
-	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	m = next.(Model)
 	if m.missionMode != missionReviewBranch {
 		t.Fatalf("mission mode = %v, want review branch", m.missionMode)
 	}
 	if m.missionInput.Prompt != "BRANCH> " {
 		t.Fatalf("mission prompt = %q, want BRANCH> ", m.missionInput.Prompt)
+	}
+}
+
+func TestNewMissionNewBranchFlow(t *testing.T) {
+	dir := t.TempDir()
+	m := New("", 10)
+	m.startMission()
+	m.missionInput.SetValue(dir)
+
+	next, _ := m.handleMissionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m = next.(Model)
+
+	if m.missionMode != missionNewBranch {
+		t.Fatalf("mission mode = %v, want new branch", m.missionMode)
+	}
+	if m.missionInput.Prompt != "NEW> " {
+		t.Fatalf("mission prompt = %q, want NEW> ", m.missionInput.Prompt)
+	}
+
+	next, _ = m.Update(newBranchDoneMsg{
+		worktreeDir: filepath.Join(dir, "..", "repo-cache-fix"),
+		copiedPath:  "../repo-cache-fix",
+	})
+	m = next.(Model)
+	if m.missionMode != missionDescribe {
+		t.Fatalf("mission mode after create = %v, want describe", m.missionMode)
+	}
+	if m.missionInput.Prompt != "MISSION> " {
+		t.Fatalf("mission prompt after create = %q, want MISSION> ", m.missionInput.Prompt)
 	}
 }
 

@@ -228,6 +228,16 @@ func (m Model) renderMissionContent(width, height int) string {
 			"",
 			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter creates worktree and launches review prompt; esc cancels", width)),
 		)
+	case missionNewBranch:
+		rows = append(rows,
+			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("NEW BRANCH WORKTREE", width)),
+			kv("repo", m.missionDir, width),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("creates ../<repo>-<name> with branch parth-<name>, then copies the path", width)),
+			"",
+			fit(m.missionInput.View(), width),
+			"",
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter creates worktree, then asks for mission objective; esc cancels", width)),
+		)
 	default:
 		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("Mission console offline.", width)))
 	}
@@ -614,11 +624,13 @@ func (m Model) renderMissionStatus() string {
 	text := "new mission: type filter/path/new repo  up/down select  enter continue  esc cancel"
 	switch m.missionMode {
 	case missionSelectKind:
-		text = "new mission: choose type  r review  s standard  up/down select  enter continue  esc cancel"
+		text = "new mission: choose type  b new branch  r review  s standard  up/down select  enter continue  esc cancel"
 	case missionDescribe:
 		text = "new mission: describe objective  enter launch  esc cancel"
 	case missionReviewBranch:
 		text = "new mission: paste branch/ref  enter create worktree + review prompt  esc cancel"
+	case missionNewBranch:
+		text = "new mission: type branch suffix  enter create worktree + copy path  esc cancel"
 	}
 	if m.status != "" {
 		text = m.status + "   " + text

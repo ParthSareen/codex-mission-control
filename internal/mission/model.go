@@ -44,6 +44,7 @@ const (
 	missionSelectKind
 	missionDescribe
 	missionReviewBranch
+	missionNewBranch
 )
 
 type Model struct {
@@ -93,6 +94,13 @@ type gitStatusMsg struct {
 	git gitSnapshot
 }
 
+type newBranchDoneMsg struct {
+	worktreeDir string
+	copiedPath  string
+	copyErr     string
+	err         error
+}
+
 type tickMsg time.Time
 
 type resumeDoneMsg struct {
@@ -125,6 +133,7 @@ type missionKindChoice struct {
 	label       string
 	description string
 	review      bool
+	newBranch   bool
 }
 
 type gitSnapshot struct {
@@ -294,6 +303,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.git = msg.git
 		}
 		return m, nil
+
+	case newBranchDoneMsg:
+		if m.missionMode != missionNewBranch {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.status = "new branch worktree failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.missionDir = msg.worktreeDir
+		m.status = "created worktree " + msg.copiedPath
+		if msg.copyErr != "" {
+			m.status += " (copy failed: " + msg.copyErr + ")"
+		}
+		m.startMissionDescribe()
+		return m, textinput.Blink
 
 	case tea.KeyMsg:
 		if m.missionMode != missionOff {
@@ -548,6 +573,11 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.startMissionReviewBranch()
 			return m, textinput.Blink
 		}
+	case "b":
+		if m.missionMode == missionSelectKind {
+			m.startMissionNewBranch()
+			return m, textinput.Blink
+		}
 	case "s":
 		if m.missionMode == missionSelectKind {
 			m.startMissionDescribe()
@@ -609,7 +639,9 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.missionMode == missionSelectKind {
 			choice := m.selectedMissionKind()
-			if choice.review {
+			if choice.newBranch {
+				m.startMissionNewBranch()
+			} else if choice.review {
 				m.startMissionReviewBranch()
 			} else {
 				m.startMissionDescribe()
@@ -625,6 +657,15 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, launchReviewBranchMissionCmd(dir, branch)
+		}
+		if m.missionMode == missionNewBranch {
+			name := strings.TrimSpace(m.missionInput.Value())
+			if name == "" {
+				m.status = "new branch canceled: empty name"
+				return m, nil
+			}
+			m.status = "creating worktree..."
+			return m, createNewBranchWorktreeCmd(m.missionDir, name)
 		}
 		prompt := strings.TrimSpace(m.missionInput.Value())
 		dir := m.missionDir
@@ -677,6 +718,15 @@ func (m *Model) startMissionReviewBranch() {
 	m.missionMode = missionReviewBranch
 	m.missionInput.Prompt = "BRANCH> "
 	m.missionInput.Placeholder = "Paste branch/ref to review..."
+	m.missionInput.SetValue("")
+	m.missionInput.Width = max(20, m.width-10)
+	m.missionInput.Focus()
+}
+
+func (m *Model) startMissionNewBranch() {
+	m.missionMode = missionNewBranch
+	m.missionInput.Prompt = "NEW> "
+	m.missionInput.Placeholder = "Branch suffix, e.g. cache-fix..."
 	m.missionInput.SetValue("")
 	m.missionInput.Width = max(20, m.width-10)
 	m.missionInput.Focus()
@@ -896,6 +946,47 @@ func launchReviewBranchMissionCmd(repoDir, branch string) tea.Cmd {
 		}
 		return launchDoneMsg{status: "launched review branch in " + worktreeDir}
 	}
+}
+
+func createNewBranchWorktreeCmd(repoDir, name string) tea.Cmd {
+	return func() tea.Msg {
+		worktreeDir, copiedPath, err := createNewBranchWorktree(repoDir, name)
+		if err != nil {
+			return newBranchDoneMsg{err: err}
+		}
+		if err := copyTextNow(copiedPath); err != nil {
+			return newBranchDoneMsg{worktreeDir: worktreeDir, copiedPath: copiedPath, copyErr: err.Error()}
+		}
+		return newBranchDoneMsg{worktreeDir: worktreeDir, copiedPath: copiedPath}
+	}
+}
+
+func createNewBranchWorktree(repoDir, name string) (string, string, error) {
+	repoDir = normalizeDir(repoDir)
+	if !dirExists(repoDir) {
+		return "", "", fmt.Errorf("repo dir not found: %s", repoDir)
+	}
+	root, err := gitOutput(repoDir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", "", fmt.Errorf("not a git repo: %s", repoDir)
+	}
+	spec, err := newBranchWorktreeSpec(root, name)
+	if err != nil {
+		return "", "", err
+	}
+	if dirExists(spec.absPath) {
+		return "", "", fmt.Errorf("worktree path already exists: %s", spec.copiedPath)
+	}
+	cmd := exec.Command("git", "-C", root, "worktree", "add", spec.copiedPath, "-b", spec.branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", "", fmt.Errorf("git worktree add: %s", msg)
+	}
+	return spec.absPath, spec.copiedPath, nil
 }
 
 func createReviewWorktree(repoDir, branch string) (string, error) {
@@ -1153,6 +1244,29 @@ func reviewWorktreeDir(repoRoot, branch string) string {
 	return filepath.Join(parent, repoName+"-"+slug)
 }
 
+type newBranchWorktree struct {
+	name       string
+	branch     string
+	copiedPath string
+	absPath    string
+}
+
+func newBranchWorktreeSpec(repoRoot, name string) (newBranchWorktree, error) {
+	repoRoot = normalizeDir(repoRoot)
+	suffix := branchSlug(strings.TrimPrefix(strings.TrimSpace(name), "parth-"))
+	if suffix == "" {
+		return newBranchWorktree{}, fmt.Errorf("empty branch suffix")
+	}
+	repoName := filepath.Base(repoRoot)
+	copiedPath := filepath.Join("..", repoName+"-"+suffix)
+	return newBranchWorktree{
+		name:       suffix,
+		branch:     "parth-" + suffix,
+		copiedPath: copiedPath,
+		absPath:    filepath.Clean(filepath.Join(repoRoot, copiedPath)),
+	}, nil
+}
+
 func branchSlug(branch string) string {
 	branch = normalizeBranchInput(branch)
 	branch = strings.TrimPrefix(branch, "origin/")
@@ -1334,6 +1448,11 @@ func missionKindChoices() []missionKindChoice {
 		{
 			label:       "STANDARD MISSION",
 			description: "Describe an objective and launch Codex in this workspace.",
+		},
+		{
+			label:       "NEW BRANCH",
+			description: "Create ../<repo>-<name> on parth-<name>, copy path, then work there.",
+			newBranch:   true,
 		},
 		{
 			label:       "REVIEW BRANCH",
@@ -1814,13 +1933,17 @@ func pageSize(height int) int {
 
 func copyText(text string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("pbcopy")
-		cmd.Stdin = strings.NewReader(text)
-		if err := cmd.Run(); err != nil {
+		if err := copyTextNow(text); err != nil {
 			return copyDoneMsg{err: err}
 		}
 		return copyDoneMsg{}
 	}
+}
+
+func copyTextNow(text string) error {
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }
 
 func min(a, b int) int {
