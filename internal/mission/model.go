@@ -138,6 +138,13 @@ type missionKindChoice struct {
 	newBranch   bool
 }
 
+type missionSearchChoice struct {
+	threadIndex int
+	thread      codex.Thread
+	dir         missionDirChoice
+	snippet     string
+}
+
 type gitSnapshot struct {
 	CWD       string
 	Branch    string
@@ -633,7 +640,7 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "end":
 		if m.missionMode == missionSelectDir {
-			m.missionDirCursor = max(0, len(m.missionDirChoices())-1)
+			m.missionDirCursor = max(0, m.missionSelectChoiceCount()-1)
 			return m, nil
 		}
 		if m.missionMode == missionSelectKind {
@@ -642,6 +649,20 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if m.missionMode == missionSelectDir {
+			if !m.missionAllowCreate {
+				choice := m.selectedMissionSearchChoice()
+				if choice.thread.ID != "" {
+					m.openSearchThread(choice.threadIndex)
+					return m, gitStatusCmd(m.selectedThread())
+				}
+				if choice.dir.dir == "" {
+					m.status = "search result not found"
+					return m, nil
+				}
+				m.missionDir = choice.dir.dir
+				m.startMissionKind()
+				return m, nil
+			}
 			choice := m.selectedMissionDirChoice()
 			if choice.dir == "" {
 				m.status = "mission dir not found"
@@ -755,21 +776,21 @@ func (m *Model) startMissionNewBranch() {
 }
 
 func (m *Model) moveMissionDir(delta int) {
-	choices := m.missionDirChoices()
-	if len(choices) == 0 {
+	count := m.missionSelectChoiceCount()
+	if count == 0 {
 		m.missionDirCursor = 0
 		return
 	}
-	m.missionDirCursor = max(0, min(len(choices)-1, m.missionDirCursor+delta))
+	m.missionDirCursor = max(0, min(count-1, m.missionDirCursor+delta))
 }
 
 func (m *Model) clampMissionDirCursor() {
-	choices := m.missionDirChoices()
-	if len(choices) == 0 {
+	count := m.missionSelectChoiceCount()
+	if count == 0 {
 		m.missionDirCursor = 0
 		return
 	}
-	m.missionDirCursor = max(0, min(len(choices)-1, m.missionDirCursor))
+	m.missionDirCursor = max(0, min(count-1, m.missionDirCursor))
 }
 
 func (m *Model) moveMissionKind(delta int) {
@@ -865,6 +886,20 @@ func (m *Model) selectFleetEntry(index int) {
 	}
 	m.selected = entries[index].threadIndex
 	m.events = m.selectedEvents()
+	m.resetCommsPosition()
+}
+
+func (m *Model) openSearchThread(index int) {
+	if index < 0 || index >= len(m.threads) {
+		return
+	}
+	m.selected = index
+	m.events = m.selectedEvents()
+	m.mode = modeFocus
+	m.focus = focusComms
+	m.git = gitSnapshot{CWD: normalizeDir(m.selectedThread().CWD)}
+	m.markSelectedSeen()
+	m.cancelMission()
 	m.resetCommsPosition()
 }
 
@@ -1389,6 +1424,44 @@ func documentsReposDir() string {
 	return filepath.Join(home, "Documents", "repos")
 }
 
+func threadSearchText(thread codex.Thread) string {
+	summary := thread.Summary
+	return strings.Join([]string{
+		thread.ID,
+		thread.Title,
+		thread.CWD,
+		thread.Source,
+		thread.Model,
+		thread.ModelProvider,
+		summary.LastUser,
+		summary.LastAssistant,
+		summary.LastFinal,
+		summary.LastEscalation,
+		summary.LastFailure,
+	}, "\n")
+}
+
+func threadSearchSnippet(thread codex.Thread, query string) string {
+	parts := []string{
+		thread.Summary.LastUser,
+		thread.Summary.LastAssistant,
+		thread.Summary.LastFinal,
+		thread.Summary.LastEscalation,
+		thread.Summary.LastFailure,
+		thread.CWD,
+	}
+	for _, part := range parts {
+		part = strings.TrimSpace(oneLine(part))
+		if part == "" {
+			continue
+		}
+		if query == "" || strings.Contains(strings.ToLower(part), query) {
+			return part
+		}
+	}
+	return thread.Title
+}
+
 func diffviewCmd(thread codex.Thread) tea.Cmd {
 	return func() tea.Msg {
 		if thread.ID == "" {
@@ -1460,6 +1533,39 @@ func (m Model) selectedEvents() []codex.Event {
 
 func (m Model) selectedMissionDir() string {
 	return m.selectedMissionDirChoice().dir
+}
+
+func (m Model) missionSelectChoiceCount() int {
+	if !m.missionAllowCreate {
+		return len(m.missionSearchChoices())
+	}
+	return len(m.missionDirChoices())
+}
+
+func (m Model) selectedMissionSearchChoice() missionSearchChoice {
+	choices := m.missionSearchChoices()
+	if len(choices) == 0 || m.missionDirCursor < 0 || m.missionDirCursor >= len(choices) {
+		return missionSearchChoice{}
+	}
+	return choices[m.missionDirCursor]
+}
+
+func (m Model) missionSearchChoices() []missionSearchChoice {
+	query := strings.ToLower(strings.TrimSpace(m.missionInput.Value()))
+	var out []missionSearchChoice
+	for i, thread := range m.threads {
+		if query == "" || strings.Contains(strings.ToLower(threadSearchText(thread)), query) {
+			out = append(out, missionSearchChoice{
+				threadIndex: i,
+				thread:      thread,
+				snippet:     threadSearchSnippet(thread, query),
+			})
+		}
+	}
+	for _, dir := range m.missionDirChoices() {
+		out = append(out, missionSearchChoice{dir: dir})
+	}
+	return out
 }
 
 func (m Model) selectedMissionKind() missionKindChoice {

@@ -479,6 +479,62 @@ func TestSlashStartsWorkspaceSearch(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSearchFindsChatSummary(t *testing.T) {
+	m := New("", 10)
+	m.threads = []codex.Thread{
+		{
+			ID:    "thread-a",
+			Title: "Cache repair",
+			Summary: codex.Summary{
+				LastUser: "Please fix the frobnicator cache path",
+			},
+		},
+	}
+	m.startWorkspaceSearch()
+	m.missionInput.SetValue("frobnicator")
+
+	choices := m.missionSearchChoices()
+	if len(choices) != 1 {
+		t.Fatalf("search choices len = %d, want 1", len(choices))
+	}
+	if choices[0].thread.ID != "thread-a" {
+		t.Fatalf("search thread = %q, want thread-a", choices[0].thread.ID)
+	}
+	if !strings.Contains(choices[0].snippet, "frobnicator") {
+		t.Fatalf("snippet = %q, want frobnicator", choices[0].snippet)
+	}
+}
+
+func TestWorkspaceSearchEnterOpensChat(t *testing.T) {
+	m := New("", 10)
+	m.threads = []codex.Thread{
+		{ID: "a", Title: "Other"},
+		{
+			ID:    "b",
+			Title: "Review branch",
+			Summary: codex.Summary{
+				LastFinalAt: time.Now(),
+				LastUser:    "Review the branch diff",
+			},
+		},
+	}
+	m.startWorkspaceSearch()
+	m.missionInput.SetValue("branch diff")
+
+	next, _ := m.handleMissionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+
+	if got := m.selectedThread().ID; got != "b" {
+		t.Fatalf("selected thread = %q, want b", got)
+	}
+	if m.mode != modeFocus || m.focus != focusComms {
+		t.Fatalf("mode/focus = %v/%v, want focus/comms", m.mode, m.focus)
+	}
+	if m.missionMode != missionOff {
+		t.Fatalf("mission mode = %v, want off", m.missionMode)
+	}
+}
+
 func TestParseGitStatus(t *testing.T) {
 	var snapshot gitSnapshot
 	parseGitBranchLine(&snapshot, "## main...origin/main [ahead 2, behind 1]")

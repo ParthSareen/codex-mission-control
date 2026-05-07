@@ -161,15 +161,30 @@ func (m Model) renderMissionContent(width, height int) string {
 		helper := "recent dirs, current repo, ~/Documents/repos; type a new name to create"
 		empty := "No matching directory. Type an existing path or a new repo name."
 		if !m.missionAllowCreate {
-			helper = "search existing folders and git worktrees from recent threads and ~/Documents/repos"
-			empty = "No matching folder or worktree."
+			helper = "search codex chats, existing folders, and git worktrees"
+			empty = "No matching chat, folder, or worktree."
 		}
 		rows = append(rows,
-			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("SELECT WORKSPACE", width)),
+			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit(m.missionSelectTitle(), width)),
 			fit(m.missionInput.View(), width),
 			lipgloss.NewStyle().Foreground(t.dim).Render(fit(helper, width)),
 			"",
 		)
+		if !m.missionAllowCreate {
+			choices := m.missionSearchChoices()
+			if len(choices) == 0 {
+				rows = append(rows, lipgloss.NewStyle().Foreground(t.err).Render(fit(empty, width)))
+				break
+			}
+			remaining := max(0, height-len(rows))
+			for i, choice := range choices {
+				if i >= remaining {
+					break
+				}
+				rows = append(rows, m.renderMissionSearchChoice(choice, i, width))
+			}
+			break
+		}
 		choices := m.missionDirChoices()
 		if len(choices) == 0 {
 			rows = append(rows, lipgloss.NewStyle().Foreground(t.err).Render(fit(empty, width)))
@@ -180,28 +195,7 @@ func (m Model) renderMissionContent(width, height int) string {
 			if i >= remaining {
 				break
 			}
-			style := lipgloss.NewStyle().Foreground(t.text)
-			prefix := " "
-			if i == m.missionDirCursor {
-				prefix = ">"
-				style = style.Background(t.panel).Foreground(t.primary).Bold(true)
-			}
-			tag := "DIR"
-			if choice.create {
-				tag = "CREATE"
-				style = style.Foreground(t.primary)
-				if i == m.missionDirCursor {
-					style = style.Background(t.panel).Foreground(t.primary).Bold(true)
-				}
-			} else if choice.worktree {
-				tag = "WORKTREE"
-				style = style.Foreground(t.accent)
-				if i == m.missionDirCursor {
-					style = style.Background(t.panel).Foreground(t.primary).Bold(true)
-				}
-			}
-			label := fmt.Sprintf("%s %-8s %-22s %s", prefix, tag, truncate(filepathBase(choice.dir), 22), truncate(choice.dir, max(1, width-36)))
-			rows = append(rows, style.Render(fit(label, width)))
+			rows = append(rows, m.renderMissionDirChoice(choice, i, width))
 		}
 	case missionSelectKind:
 		rows = append(rows,
@@ -260,6 +254,61 @@ func (m Model) renderMissionContent(width, height int) string {
 		rows = rows[:height]
 	}
 	return strings.Join(rows, "\n")
+}
+
+func (m Model) missionSelectTitle() string {
+	if m.missionAllowCreate {
+		return "SELECT WORKSPACE"
+	}
+	return "SEARCH"
+}
+
+func (m Model) renderMissionSearchChoice(choice missionSearchChoice, index, width int) string {
+	if choice.thread.ID != "" {
+		return m.renderMissionThreadChoice(choice, index, width)
+	}
+	return m.renderMissionDirChoice(choice.dir, index, width)
+}
+
+func (m Model) renderMissionThreadChoice(choice missionSearchChoice, index, width int) string {
+	t := m.theme()
+	style := lipgloss.NewStyle().Foreground(t.warn)
+	prefix := " "
+	if index == m.missionDirCursor {
+		prefix = ">"
+		style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+	}
+	title := truncate(fallback(choice.thread.Title, shortID(choice.thread.ID)), 22)
+	status := m.displayStatus(choice.thread)
+	detail := truncate(fmt.Sprintf("%s  %s", status, oneLine(choice.snippet)), max(1, width-36))
+	label := fmt.Sprintf("%s %-8s %-22s %s", prefix, "CHAT", title, detail)
+	return style.Render(fit(label, width))
+}
+
+func (m Model) renderMissionDirChoice(choice missionDirChoice, index, width int) string {
+	t := m.theme()
+	style := lipgloss.NewStyle().Foreground(t.text)
+	prefix := " "
+	if index == m.missionDirCursor {
+		prefix = ">"
+		style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+	}
+	tag := "DIR"
+	if choice.create {
+		tag = "CREATE"
+		style = style.Foreground(t.primary)
+		if index == m.missionDirCursor {
+			style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+		}
+	} else if choice.worktree {
+		tag = "WORKTREE"
+		style = style.Foreground(t.accent)
+		if index == m.missionDirCursor {
+			style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+		}
+	}
+	label := fmt.Sprintf("%s %-8s %-22s %s", prefix, tag, truncate(filepathBase(choice.dir), 22), truncate(choice.dir, max(1, width-36)))
+	return style.Render(fit(label, width))
 }
 
 func (m Model) renderFleet(width, height int) string {
@@ -638,7 +687,7 @@ func (m Model) renderMissionStatus() string {
 	t := m.theme()
 	text := "new mission: type filter/path/new repo  up/down select  enter continue  esc cancel"
 	if m.missionMode == missionSelectDir && !m.missionAllowCreate {
-		text = "workspace search: type filter/path  up/down select  enter choose mission type  esc cancel"
+		text = "search: type chat/folder query  up/down select  enter open chat or choose mission type  esc cancel"
 	}
 	switch m.missionMode {
 	case missionSelectKind:
