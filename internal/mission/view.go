@@ -22,10 +22,15 @@ func (m Model) View() string {
 	status := m.renderStatus()
 	if m.askMode {
 		status = m.renderAskBar()
+	} else if m.missionMode != missionOff {
+		status = m.renderMissionStatus()
 	}
 
 	bodyHeight := max(8, m.height-lipgloss.Height(header)-lipgloss.Height(status))
 	body := m.renderMain(bodyHeight)
+	if m.missionMode != missionOff {
+		body = m.renderMission(bodyHeight)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, status)
 }
 
@@ -128,6 +133,63 @@ func (m Model) renderMain(height int) string {
 	bottom := lipgloss.JoinHorizontal(lipgloss.Top, telemetry, tools)
 	right := lipgloss.JoinVertical(lipgloss.Left, comms, bottom)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+}
+
+func (m Model) renderMission(height int) string {
+	title := "NEW MISSION"
+	content := m.renderMissionContent(m.width-2, height-3)
+	return m.panel(m.width, height, title, content, true)
+}
+
+func (m Model) renderMissionContent(width, height int) string {
+	t := m.theme()
+	if height <= 0 {
+		return ""
+	}
+	var rows []string
+	switch m.missionMode {
+	case missionSelectDir:
+		rows = append(rows,
+			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("SELECT WORKSPACE", width)),
+			fit(m.missionInput.View(), width),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("recent thread directories, current repo, and ~/Documents/repos", width)),
+			"",
+		)
+		dirs := m.filteredMissionDirs()
+		if len(dirs) == 0 {
+			rows = append(rows, lipgloss.NewStyle().Foreground(t.err).Render(fit("No matching directory. Type an existing path, or press esc.", width)))
+			break
+		}
+		remaining := max(0, height-len(rows))
+		for i, dir := range dirs {
+			if i >= remaining {
+				break
+			}
+			style := lipgloss.NewStyle().Foreground(t.text)
+			prefix := " "
+			if i == m.missionDirCursor {
+				prefix = ">"
+				style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+			}
+			label := fmt.Sprintf("%s %-22s %s", prefix, truncate(filepathBase(dir), 22), truncate(dir, max(1, width-26)))
+			rows = append(rows, style.Render(fit(label, width)))
+		}
+	case missionDescribe:
+		rows = append(rows,
+			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("DESCRIBE OBJECTIVE", width)),
+			kv("cwd", m.missionDir, width),
+			"",
+			fit(m.missionInput.View(), width),
+			"",
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter launches a new Codex session in Ghostty/tmux; esc cancels", width)),
+		)
+	default:
+		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("Mission console offline.", width)))
+	}
+	if len(rows) > height {
+		rows = rows[:height]
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m Model) renderFleet(width, height int) string {
@@ -418,9 +480,9 @@ func (m Model) renderStatus() string {
 	} else if m.focus == focusComms {
 		focus = "comms"
 	}
-	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  c comms  d diff  o fleet  r launch  R ask  t theme  space pause  q quit", focus)
+	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  n new  c comms  d diff  o fleet  r launch  R ask  t theme  space pause  q quit", focus)
 	if m.mode == modeFocus {
-		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  d diff  o fleet  r launch  R ask  q quit", focus)
+		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  n new  d diff  o fleet  r launch  R ask  q quit", focus)
 	}
 	if m.status != "" {
 		left = m.status + "   " + left
@@ -439,6 +501,18 @@ func (m Model) renderAskBar() string {
 		BorderForeground(t.primary).
 		Width(m.width).
 		Render(m.ask.View())
+}
+
+func (m Model) renderMissionStatus() string {
+	t := m.theme()
+	text := "new mission: type filter/path  j/k select dir  enter continue  esc cancel"
+	if m.missionMode == missionDescribe {
+		text = "new mission: describe objective  enter launch  esc cancel"
+	}
+	if m.status != "" {
+		text = m.status + "   " + text
+	}
+	return lipgloss.NewStyle().Foreground(t.dim).Width(m.width).Render(fit(text, m.width))
 }
 
 func (m Model) panel(width, height int, title, content string, active bool) string {
@@ -616,6 +690,17 @@ func fallback(s, alt string) string {
 		return alt
 	}
 	return s
+}
+
+func filepathBase(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "-"
+	}
+	parts := strings.Split(strings.TrimRight(path, "/"), "/")
+	if len(parts) == 0 {
+		return path
+	}
+	return parts[len(parts)-1]
 }
 
 func compactInt(n int64) string {

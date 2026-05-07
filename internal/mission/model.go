@@ -32,6 +32,14 @@ const (
 	focusComms
 )
 
+type missionMode int
+
+const (
+	missionOff missionMode = iota
+	missionSelectDir
+	missionDescribe
+)
+
 type Model struct {
 	store       codex.Store
 	limit       int
@@ -56,6 +64,11 @@ type Model struct {
 
 	askMode bool
 	ask     textinput.Model
+
+	missionMode      missionMode
+	missionInput     textinput.Model
+	missionDir       string
+	missionDirCursor int
 }
 
 type refreshMsg struct {
@@ -71,7 +84,8 @@ type resumeDoneMsg struct {
 }
 
 type launchDoneMsg struct {
-	err error
+	status string
+	err    error
 }
 
 type copyDoneMsg struct {
@@ -89,14 +103,21 @@ func New(codexHome string, limit int) Model {
 	ti.CharLimit = 4000
 	ti.Width = 80
 
+	mi := textinput.New()
+	mi.Placeholder = "Filter recent dirs or type a directory path..."
+	mi.Prompt = "DIR> "
+	mi.CharLimit = 4000
+	mi.Width = 80
+
 	return Model{
-		store:      codex.NewStore(codexHome),
-		limit:      limit,
-		width:      120,
-		height:     34,
-		seenFinals: make(map[string]time.Time),
-		themeIdx:   0,
-		ask:        ti,
+		store:        codex.NewStore(codexHome),
+		limit:        limit,
+		width:        120,
+		height:       34,
+		seenFinals:   make(map[string]time.Time),
+		themeIdx:     0,
+		ask:          ti,
+		missionInput: mi,
 	}
 }
 
@@ -131,6 +152,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		if m.ask.Width > m.width-10 {
 			m.ask.Width = max(20, m.width-10)
+		}
+		if m.missionInput.Width > m.width-10 {
+			m.missionInput.Width = max(20, m.width-10)
 		}
 		return m, nil
 
@@ -170,8 +194,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case launchDoneMsg:
 		if msg.err != nil {
 			m.status = "launch failed: " + msg.err.Error()
+		} else if msg.status != "" {
+			m.status = msg.status
 		} else {
-			m.status = "launched codex resume"
+			m.status = "launched codex"
 		}
 		return m, refreshCmd(m)
 
@@ -192,6 +218,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, refreshCmd(m)
 
 	case tea.KeyMsg:
+		if m.missionMode != missionOff {
+			return m.handleMissionKey(msg)
+		}
 		return m.handleKey(msg)
 
 	case tea.MouseMsg:
@@ -235,6 +264,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "n":
+		m.startMission()
+		return m, textinput.Blink
 	case "tab":
 		if m.mode == modeFocus {
 			if m.focus == focusThreads {
@@ -383,6 +415,105 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) startMission() {
+	m.askMode = false
+	m.ask.Blur()
+	m.missionMode = missionSelectDir
+	m.missionDir = ""
+	m.missionDirCursor = 0
+	m.missionInput.Prompt = "DIR> "
+	m.missionInput.Placeholder = "Filter recent dirs or type a directory path..."
+	m.missionInput.SetValue("")
+	m.missionInput.Width = max(20, m.width-10)
+	m.missionInput.Focus()
+}
+
+func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "esc", "ctrl+c":
+		m.cancelMission()
+		return m, nil
+	case "j", "down":
+		if m.missionMode == missionSelectDir {
+			m.moveMissionDir(1)
+			return m, nil
+		}
+	case "k", "up":
+		if m.missionMode == missionSelectDir {
+			m.moveMissionDir(-1)
+			return m, nil
+		}
+	case "g", "home":
+		if m.missionMode == missionSelectDir {
+			m.missionDirCursor = 0
+			return m, nil
+		}
+	case "G", "end":
+		if m.missionMode == missionSelectDir {
+			m.missionDirCursor = max(0, len(m.filteredMissionDirs())-1)
+			return m, nil
+		}
+	case "enter":
+		if m.missionMode == missionSelectDir {
+			dir := m.selectedMissionDir()
+			if dir == "" {
+				m.status = "mission dir not found"
+				return m, nil
+			}
+			m.missionDir = dir
+			m.missionMode = missionDescribe
+			m.missionInput.Prompt = "MISSION> "
+			m.missionInput.Placeholder = "Describe the mission..."
+			m.missionInput.SetValue("")
+			m.missionInput.Width = max(20, m.width-10)
+			m.missionInput.Focus()
+			return m, textinput.Blink
+		}
+		prompt := strings.TrimSpace(m.missionInput.Value())
+		dir := m.missionDir
+		m.cancelMission()
+		if prompt == "" {
+			m.status = "mission launch canceled: empty mission"
+			return m, nil
+		}
+		return m, launchNewMissionCmd(dir, prompt)
+	}
+
+	var cmd tea.Cmd
+	m.missionInput, cmd = m.missionInput.Update(msg)
+	if m.missionMode == missionSelectDir {
+		m.clampMissionDirCursor()
+	}
+	return m, cmd
+}
+
+func (m *Model) cancelMission() {
+	m.missionMode = missionOff
+	m.missionDir = ""
+	m.missionDirCursor = 0
+	m.missionInput.Blur()
+	m.missionInput.SetValue("")
+}
+
+func (m *Model) moveMissionDir(delta int) {
+	dirs := m.filteredMissionDirs()
+	if len(dirs) == 0 {
+		m.missionDirCursor = 0
+		return
+	}
+	m.missionDirCursor = max(0, min(len(dirs)-1, m.missionDirCursor+delta))
+}
+
+func (m *Model) clampMissionDirCursor() {
+	dirs := m.filteredMissionDirs()
+	if len(dirs) == 0 {
+		m.missionDirCursor = 0
+		return
+	}
+	m.missionDirCursor = max(0, min(len(dirs)-1, m.missionDirCursor))
+}
+
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.MouseWheelUp:
@@ -525,24 +656,38 @@ func launchCodexCmd(thread codex.Thread, prompt string) tea.Cmd {
 		if strings.TrimSpace(thread.CWD) == "" {
 			return launchDoneMsg{err: fmt.Errorf("selected thread has no cwd")}
 		}
-		if err := launchCodexDetached(thread, prompt); err != nil {
+		line := codexResumeShellLine(thread, prompt)
+		if err := launchCodexDetached(thread.CWD, "codex-"+shortID(thread.ID), line); err != nil {
 			return launchDoneMsg{err: err}
 		}
-		return launchDoneMsg{}
+		return launchDoneMsg{status: "launched codex resume"}
 	}
 }
 
-func launchCodexDetached(thread codex.Thread, prompt string) error {
-	line := codexResumeShellLine(thread, prompt)
+func launchNewMissionCmd(cwd, prompt string) tea.Cmd {
+	return func() tea.Msg {
+		cwd = normalizeDir(cwd)
+		if !dirExists(cwd) {
+			return launchDoneMsg{err: fmt.Errorf("mission dir not found: %s", cwd)}
+		}
+		line := codexNewMissionShellLine(cwd, prompt)
+		if err := launchCodexDetached(cwd, "codex-mission", line); err != nil {
+			return launchDoneMsg{err: err}
+		}
+		return launchDoneMsg{status: "launched new mission"}
+	}
+}
+
+func launchCodexDetached(cwd, title, line string) error {
 	if runtime.GOOS == "darwin" && commandExists("osascript") {
-		if err := launchGhosttyCodex(thread, line); err == nil {
+		if err := launchGhosttyCodex(cwd, line); err == nil {
 			return nil
 		} else if os.Getenv("TMUX") == "" {
 			return err
 		}
 	}
 	if os.Getenv("TMUX") != "" && commandExists("tmux") {
-		cmd := exec.Command("tmux", "new-window", "-c", thread.CWD, "-n", "codex-"+shortID(thread.ID), line)
+		cmd := exec.Command("tmux", "new-window", "-c", cwd, "-n", title, line)
 		return runLauncher(cmd)
 	}
 	if runtime.GOOS == "darwin" && commandExists("osascript") {
@@ -556,8 +701,8 @@ end tell`, strconv.Quote(line))
 	return fmt.Errorf("no detached terminal launcher found")
 }
 
-func launchGhosttyCodex(thread codex.Thread, line string) error {
-	cmd := exec.Command("osascript", "-e", ghosttyLaunchScript(thread.CWD, line, isGhosttySession()))
+func launchGhosttyCodex(cwd, line string) error {
+	cmd := exec.Command("osascript", "-e", ghosttyLaunchScript(cwd, line, isGhosttySession()))
 	return runLauncher(cmd)
 }
 
@@ -609,6 +754,15 @@ func codexResumeShellLine(thread codex.Thread, prompt string) string {
 	return strings.Join(parts, " ")
 }
 
+func codexNewMissionShellLine(cwd, prompt string) string {
+	parts := []string{"cd", shellQuote(cwd), "&&", "codex"}
+	if strings.TrimSpace(prompt) != "" {
+		parts = append(parts, shellQuote(prompt))
+	}
+	parts = append(parts, ";", "printf", shellQuote("\\n[codex exited - press enter or close this terminal]\\n"), ";", "exec", "${SHELL:-/bin/zsh}", "-l")
+	return strings.Join(parts, " ")
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
@@ -616,6 +770,61 @@ func shellQuote(s string) string {
 func commandExists(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+func typedMissionDir(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || !looksLikePath(value) {
+		return "", false
+	}
+	dir := normalizeDir(value)
+	return dir, dirExists(dir)
+}
+
+func looksLikePath(value string) bool {
+	return strings.HasPrefix(value, "/") ||
+		strings.HasPrefix(value, "~") ||
+		strings.HasPrefix(value, ".") ||
+		strings.Contains(value, string(os.PathSeparator))
+}
+
+func normalizeDir(dir string) string {
+	dir = strings.TrimSpace(expandUserPath(dir))
+	if dir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return filepath.Clean(dir)
+}
+
+func expandUserPath(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
+func dirExists(dir string) bool {
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func diffviewCmd(thread codex.Thread) tea.Cmd {
@@ -676,6 +885,91 @@ func (m Model) selectedEvents() []codex.Event {
 		return nil
 	}
 	return m.store.LoadThreadEvents(thread, 260)
+}
+
+func (m Model) selectedMissionDir() string {
+	if dir, ok := typedMissionDir(m.missionInput.Value()); ok {
+		return dir
+	}
+	dirs := m.filteredMissionDirs()
+	if len(dirs) == 0 || m.missionDirCursor < 0 || m.missionDirCursor >= len(dirs) {
+		return ""
+	}
+	return dirs[m.missionDirCursor]
+}
+
+func (m Model) filteredMissionDirs() []string {
+	rawQuery := strings.TrimSpace(m.missionInput.Value())
+	query := strings.ToLower(rawQuery)
+	dirs := m.missionDirOptions()
+	var out []string
+	if dir, ok := typedMissionDir(rawQuery); ok {
+		out = append(out, dir)
+	}
+	for _, dir := range dirs {
+		if query == "" ||
+			strings.Contains(strings.ToLower(dir), query) ||
+			strings.Contains(strings.ToLower(filepath.Base(dir)), query) {
+			if !containsString(out, dir) {
+				out = append(out, dir)
+			}
+		}
+	}
+	return out
+}
+
+func (m Model) missionDirOptions() []string {
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(dir string) {
+		dir = normalizeDir(dir)
+		if dir == "" || seen[dir] || !dirExists(dir) {
+			return
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	addChildren := func(root string) {
+		root = normalizeDir(root)
+		if root == "" || !dirExists(root) {
+			return
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() || strings.HasPrefix(name, ".") || name == "node_modules" {
+				continue
+			}
+			add(filepath.Join(root, name))
+		}
+	}
+
+	add(m.selectedThread().CWD)
+	for _, thread := range m.threads {
+		add(thread.CWD)
+	}
+	if selected := normalizeDir(m.selectedThread().CWD); selected != "" {
+		addChildren(filepath.Dir(selected))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		add(cwd)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		repos := filepath.Join(home, "Documents", "repos")
+		experiments := filepath.Join(repos, "experiments")
+		personal := filepath.Join(repos, "personal")
+		add(repos)
+		add(experiments)
+		add(personal)
+		addChildren(repos)
+		addChildren(experiments)
+		addChildren(personal)
+		add(home)
+	}
+	return dirs
 }
 
 func (m *Model) markSelectedSeen() {

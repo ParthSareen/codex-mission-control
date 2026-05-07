@@ -97,6 +97,31 @@ func TestCodexResumeShellLineQuotesCWDAndPrompt(t *testing.T) {
 	}
 }
 
+func TestCodexNewMissionShellLineQuotesCWDAndPrompt(t *testing.T) {
+	line := codexNewMissionShellLine("/tmp/space dir", "build it's alive")
+
+	for _, want := range []string{
+		"cd '/tmp/space dir'",
+		"codex 'build it'\"'\"'s alive'",
+		"printf '\\n[codex exited - press enter or close this terminal]\\n'",
+		"exec ${SHELL:-/bin/zsh} -l",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("shell line %q does not contain %q", line, want)
+		}
+	}
+}
+
+func TestSelectedMissionDirAcceptsTypedPath(t *testing.T) {
+	dir := t.TempDir()
+	m := New("", 10)
+	m.missionInput.SetValue(dir)
+
+	if got := m.selectedMissionDir(); got != dir {
+		t.Fatalf("selected mission dir = %q, want %q", got, dir)
+	}
+}
+
 func TestGhosttyLaunchScriptUsesSurfaceConfig(t *testing.T) {
 	script := ghosttyLaunchScript("/tmp/work tree", "codex resume 'abc'", true)
 
