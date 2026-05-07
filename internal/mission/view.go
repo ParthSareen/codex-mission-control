@@ -611,9 +611,9 @@ func (m Model) renderStatus() string {
 	} else if m.focus == focusComms {
 		focus = "comms"
 	}
-	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  n new  w workspace  c comms  d diff  o fleet  r launch  R ask  t theme  space pause  q quit", focus)
+	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  / search  n new  c comms  d diff  o fleet  r launch  R ask  t theme  space pause  q quit", focus)
 	if m.mode == modeFocus {
-		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  n new  w workspace  d diff  o fleet  r launch  R ask  q quit", focus)
+		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  / search  n new  d diff  o fleet  r launch  R ask  q quit", focus)
 	}
 	if m.status != "" {
 		left = m.status + "   " + left

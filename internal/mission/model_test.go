@@ -459,10 +459,10 @@ func TestMissionDirFilterAllowsJAndKTyping(t *testing.T) {
 	}
 }
 
-func TestWorkspaceSearchKeyStartsFolderSearch(t *testing.T) {
+func TestSlashStartsWorkspaceSearch(t *testing.T) {
 	m := New("", 10)
 
-	next, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	next, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	m = next.(Model)
 
 	if cmd == nil {

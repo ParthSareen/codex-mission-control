@@ -45,7 +45,7 @@ tab            switch between thread list and fleet/comms pane
 c              open comms for selected thread
 d              open nvim DiffviewOpen in the selected thread cwd
 n              create a new mission: pick/create cwd, branch/review optional, launch codex
-w              search folders/worktrees, then choose a mission flow
+/              search folders/worktrees, then choose a mission flow
 enter          open comms for selected thread
 o              fleet overview
 pgup/pgdn      scroll comms history

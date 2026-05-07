@@ -393,7 +393,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.startMission()
 		return m, textinput.Blink
-	case "w":
+	case "/":
 		m.startWorkspaceSearch()
 		return m, textinput.Blink
 	case "tab":
