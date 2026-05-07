@@ -16,7 +16,7 @@ CLI, starting with `codex resume <thread-id>`.
 Install:
 
 ```sh
-go install github.com/parthsareen/codex-mission-control/cmd/cmc@v0.1.1
+go install github.com/parthsareen/codex-mission-control/cmd/cmc@v0.1.2
 ```
 
 ```sh
@@ -44,7 +44,7 @@ tab            switch between thread list and fleet/comms pane
 1-9, 0         jump to fleet callsign, with 0 selecting the tenth row
 c              open comms for selected thread
 d              open nvim DiffviewOpen in the selected thread cwd
-n              create a new mission: pick cwd, describe objective, launch codex
+n              create a new mission: pick/create cwd, describe objective, launch codex
 enter          open comms for selected thread
 o              fleet overview
 pgup/pgdn      scroll comms history

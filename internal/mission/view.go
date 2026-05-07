@@ -152,16 +152,16 @@ func (m Model) renderMissionContent(width, height int) string {
 		rows = append(rows,
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("SELECT WORKSPACE", width)),
 			fit(m.missionInput.View(), width),
-			lipgloss.NewStyle().Foreground(t.dim).Render(fit("recent thread directories, current repo, and ~/Documents/repos", width)),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("recent dirs, current repo, ~/Documents/repos; type a new name to create", width)),
 			"",
 		)
-		dirs := m.filteredMissionDirs()
-		if len(dirs) == 0 {
-			rows = append(rows, lipgloss.NewStyle().Foreground(t.err).Render(fit("No matching directory. Type an existing path, or press esc.", width)))
+		choices := m.missionDirChoices()
+		if len(choices) == 0 {
+			rows = append(rows, lipgloss.NewStyle().Foreground(t.err).Render(fit("No matching directory. Type an existing path or a new repo name.", width)))
 			break
 		}
 		remaining := max(0, height-len(rows))
-		for i, dir := range dirs {
+		for i, choice := range choices {
 			if i >= remaining {
 				break
 			}
@@ -171,7 +171,15 @@ func (m Model) renderMissionContent(width, height int) string {
 				prefix = ">"
 				style = style.Background(t.panel).Foreground(t.primary).Bold(true)
 			}
-			label := fmt.Sprintf("%s %-22s %s", prefix, truncate(filepathBase(dir), 22), truncate(dir, max(1, width-26)))
+			tag := "DIR"
+			if choice.create {
+				tag = "CREATE"
+				style = style.Foreground(t.primary)
+				if i == m.missionDirCursor {
+					style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+				}
+			}
+			label := fmt.Sprintf("%s %-6s %-22s %s", prefix, tag, truncate(filepathBase(choice.dir), 22), truncate(choice.dir, max(1, width-34)))
 			rows = append(rows, style.Render(fit(label, width)))
 		}
 	case missionDescribe:
@@ -505,7 +513,7 @@ func (m Model) renderAskBar() string {
 
 func (m Model) renderMissionStatus() string {
 	t := m.theme()
-	text := "new mission: type filter/path  up/down select dir  enter continue  esc cancel"
+	text := "new mission: type filter/path/new repo  up/down select  enter continue  esc cancel"
 	if m.missionMode == missionDescribe {
 		text = "new mission: describe objective  enter launch  esc cancel"
 	}

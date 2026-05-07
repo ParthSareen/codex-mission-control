@@ -105,6 +105,11 @@ type uiStateSavedMsg struct {
 	err error
 }
 
+type missionDirChoice struct {
+	dir    string
+	create bool
+}
+
 type persistedUIState struct {
 	Theme          string            `json:"theme"`
 	ThemeIndex     int               `json:"theme_index"`
@@ -510,17 +515,24 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "end":
 		if m.missionMode == missionSelectDir {
-			m.missionDirCursor = max(0, len(m.filteredMissionDirs())-1)
+			m.missionDirCursor = max(0, len(m.missionDirChoices())-1)
 			return m, nil
 		}
 	case "enter":
 		if m.missionMode == missionSelectDir {
-			dir := m.selectedMissionDir()
-			if dir == "" {
+			choice := m.selectedMissionDirChoice()
+			if choice.dir == "" {
 				m.status = "mission dir not found"
 				return m, nil
 			}
-			m.missionDir = dir
+			if choice.create {
+				if err := os.MkdirAll(choice.dir, 0o755); err != nil {
+					m.status = "mission dir create failed: " + err.Error()
+					return m, nil
+				}
+				m.status = "created workspace " + choice.dir
+			}
+			m.missionDir = choice.dir
 			m.missionMode = missionDescribe
 			m.missionInput.Prompt = "MISSION> "
 			m.missionInput.Placeholder = "Describe the mission..."
@@ -556,21 +568,21 @@ func (m *Model) cancelMission() {
 }
 
 func (m *Model) moveMissionDir(delta int) {
-	dirs := m.filteredMissionDirs()
-	if len(dirs) == 0 {
+	choices := m.missionDirChoices()
+	if len(choices) == 0 {
 		m.missionDirCursor = 0
 		return
 	}
-	m.missionDirCursor = max(0, min(len(dirs)-1, m.missionDirCursor+delta))
+	m.missionDirCursor = max(0, min(len(choices)-1, m.missionDirCursor+delta))
 }
 
 func (m *Model) clampMissionDirCursor() {
-	dirs := m.filteredMissionDirs()
-	if len(dirs) == 0 {
+	choices := m.missionDirChoices()
+	if len(choices) == 0 {
 		m.missionDirCursor = 0
 		return
 	}
-	m.missionDirCursor = max(0, min(len(dirs)-1, m.missionDirCursor))
+	m.missionDirCursor = max(0, min(len(choices)-1, m.missionDirCursor))
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -839,6 +851,23 @@ func typedMissionDir(value string) (string, bool) {
 	return dir, dirExists(dir)
 }
 
+func missionCreateDir(value string) (string, bool) {
+	name := strings.TrimSpace(value)
+	if name == "" || looksLikePath(name) {
+		return "", false
+	}
+	name = filepath.Clean(name)
+	if name == "." || name == ".." || strings.HasPrefix(name, ".") || filepath.Base(name) != name {
+		return "", false
+	}
+	root := documentsReposDir()
+	if root == "" {
+		return "", false
+	}
+	dir := filepath.Join(root, name)
+	return dir, !dirExists(dir)
+}
+
 func looksLikePath(value string) bool {
 	return strings.HasPrefix(value, "/") ||
 		strings.HasPrefix(value, "~") ||
@@ -876,13 +905,12 @@ func dirExists(dir string) bool {
 	return err == nil && info.IsDir()
 }
 
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
+func documentsReposDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
 	}
-	return false
+	return filepath.Join(home, "Documents", "repos")
 }
 
 func diffviewCmd(thread codex.Thread) tea.Cmd {
@@ -955,31 +983,55 @@ func (m Model) selectedEvents() []codex.Event {
 }
 
 func (m Model) selectedMissionDir() string {
-	if dir, ok := typedMissionDir(m.missionInput.Value()); ok {
-		return dir
+	return m.selectedMissionDirChoice().dir
+}
+
+func (m Model) selectedMissionDirChoice() missionDirChoice {
+	choices := m.missionDirChoices()
+	if len(choices) == 0 || m.missionDirCursor < 0 || m.missionDirCursor >= len(choices) {
+		return missionDirChoice{}
 	}
-	dirs := m.filteredMissionDirs()
-	if len(dirs) == 0 || m.missionDirCursor < 0 || m.missionDirCursor >= len(dirs) {
-		return ""
-	}
-	return dirs[m.missionDirCursor]
+	return choices[m.missionDirCursor]
 }
 
 func (m Model) filteredMissionDirs() []string {
+	choices := m.missionDirChoices()
+	out := make([]string, 0, len(choices))
+	for _, choice := range choices {
+		if !choice.create {
+			out = append(out, choice.dir)
+		}
+	}
+	return out
+}
+
+func (m Model) missionDirChoices() []missionDirChoice {
 	rawQuery := strings.TrimSpace(m.missionInput.Value())
 	query := strings.ToLower(rawQuery)
-	dirs := m.missionDirOptions()
-	var out []string
-	if dir, ok := typedMissionDir(rawQuery); ok {
-		out = append(out, dir)
+	var out []missionDirChoice
+	add := func(choice missionDirChoice) {
+		if choice.dir == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing.dir == choice.dir {
+				return
+			}
+		}
+		out = append(out, choice)
 	}
+	if dir, ok := typedMissionDir(m.missionInput.Value()); ok {
+		add(missionDirChoice{dir: dir})
+	}
+	if dir, ok := missionCreateDir(rawQuery); ok {
+		add(missionDirChoice{dir: dir, create: true})
+	}
+	dirs := m.missionDirOptions()
 	for _, dir := range dirs {
 		if query == "" ||
 			strings.Contains(strings.ToLower(dir), query) ||
 			strings.Contains(strings.ToLower(filepath.Base(dir)), query) {
-			if !containsString(out, dir) {
-				out = append(out, dir)
-			}
+			add(missionDirChoice{dir: dir})
 		}
 	}
 	return out
@@ -1025,7 +1077,7 @@ func (m Model) missionDirOptions() []string {
 		add(cwd)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		repos := filepath.Join(home, "Documents", "repos")
+		repos := documentsReposDir()
 		experiments := filepath.Join(repos, "experiments")
 		personal := filepath.Join(repos, "personal")
 		add(repos)

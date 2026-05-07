@@ -269,6 +269,50 @@ func TestSelectedMissionDirAcceptsTypedPath(t *testing.T) {
 	}
 }
 
+func TestMissionDirChoicesOfferCreateUnderDocumentsRepos(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repos := filepath.Join(home, "Documents", "repos")
+	if err := os.MkdirAll(repos, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New("", 10)
+	m.startMission()
+	m.missionInput.SetValue("new-lab")
+
+	choice := m.selectedMissionDirChoice()
+	if !choice.create {
+		t.Fatalf("selected choice create = false, want true: %#v", choice)
+	}
+	if want := filepath.Join(repos, "new-lab"); choice.dir != want {
+		t.Fatalf("create dir = %q, want %q", choice.dir, want)
+	}
+}
+
+func TestNewMissionCreatesSelectedRepoDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repos := filepath.Join(home, "Documents", "repos")
+	want := filepath.Join(repos, "new-lab")
+
+	m := New("", 10)
+	m.startMission()
+	m.missionInput.SetValue("new-lab")
+	next, _ := m.handleMissionKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+
+	if !dirExists(want) {
+		t.Fatalf("created dir missing: %s", want)
+	}
+	if m.missionMode != missionDescribe {
+		t.Fatalf("mission mode = %v, want describe", m.missionMode)
+	}
+	if m.missionDir != want {
+		t.Fatalf("mission dir = %q, want %q", m.missionDir, want)
+	}
+}
+
 func TestMissionDirFilterAllowsJAndKTyping(t *testing.T) {
 	m := New(t.TempDir(), 10)
 	m.startMission()
