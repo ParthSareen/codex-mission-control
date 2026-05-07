@@ -1106,6 +1106,18 @@ func createReviewWorktree(repoDir, branch string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("not a git repo: %s", repoDir)
 	}
+	if current, err := gitOutput(root, "branch", "--show-current"); err == nil && reviewBranchMatchesCurrent(current, branch) {
+		return root, nil
+	}
+	if existing, ok, err := existingWorktreeForBranch(root, branch); err != nil {
+		return "", fmt.Errorf("git worktree list: %w", err)
+	} else if ok {
+		existing = normalizeDir(existing)
+		if !dirExists(existing) {
+			return "", fmt.Errorf("branch %s is already registered to missing worktree: %s", branch, existing)
+		}
+		return existing, nil
+	}
 	worktreeDir := reviewWorktreeDir(root, branch)
 	if dirExists(worktreeDir) {
 		if _, err := gitOutput(worktreeDir, "rev-parse", "--is-inside-work-tree"); err != nil {
@@ -1334,6 +1346,18 @@ func normalizeBranchInput(branch string) string {
 	branch = strings.TrimSpace(branch)
 	branch = strings.TrimPrefix(branch, "refs/heads/")
 	branch = strings.TrimPrefix(branch, "refs/remotes/")
+	return branch
+}
+
+func reviewBranchMatchesCurrent(current, requested string) bool {
+	current = localReviewBranchName(current)
+	requested = localReviewBranchName(requested)
+	return current != "" && requested != "" && current == requested
+}
+
+func localReviewBranchName(branch string) string {
+	branch = normalizeBranchInput(branch)
+	branch = strings.TrimPrefix(branch, "origin/")
 	return branch
 }
 

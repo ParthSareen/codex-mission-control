@@ -515,6 +515,26 @@ func TestReviewWorktreeDirSanitizesBranch(t *testing.T) {
 	}
 }
 
+func TestReviewBranchMatchesCurrent(t *testing.T) {
+	cases := []struct {
+		current   string
+		requested string
+		want      bool
+	}{
+		{"parth/launch-codex-app", "parth/launch-codex-app", true},
+		{"parth/launch-codex-app", "origin/parth/launch-codex-app", true},
+		{"feature/review", "refs/remotes/origin/feature/review", true},
+		{"main", "refs/heads/main", true},
+		{"parth/launch-codex-app", "parth/other", false},
+		{"", "parth/launch-codex-app", false},
+	}
+	for _, tc := range cases {
+		if got := reviewBranchMatchesCurrent(tc.current, tc.requested); got != tc.want {
+			t.Fatalf("reviewBranchMatchesCurrent(%q, %q) = %v, want %v", tc.current, tc.requested, got, tc.want)
+		}
+	}
+}
+
 func TestNewBranchWorktreeSpecUsesDuckyPattern(t *testing.T) {
 	spec, err := newBranchWorktreeSpec("/Users/me/Documents/repos/ollama", "cache/fix")
 	if err != nil {
