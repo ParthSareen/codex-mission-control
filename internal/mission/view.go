@@ -417,7 +417,12 @@ func (m Model) renderSelectedChannel(width, height int) string {
 		if status == "REVIEW" || status == "FINAL" {
 			label = "final"
 		}
-		rows = append(rows, fit(fmt.Sprintf("%-6s %s", label, truncate(oneLine(latest), max(1, width-7))), width))
+		if label == "final" {
+			latest = reviewSummaryText(latest)
+		} else {
+			latest = oneLine(latest)
+		}
+		rows = append(rows, fit(fmt.Sprintf("%-6s %s", label, truncate(latest, max(1, width-7))), width))
 	}
 	if len(rows) > height {
 		rows = rows[:height]
@@ -548,7 +553,7 @@ func (m Model) renderTelemetry(width, height int) string {
 		kv("control", "r resume  R ask", width),
 	)
 	if thread.Summary.LastFinal != "" {
-		rows = append(rows, lipgloss.NewStyle().Foreground(t.warn).Render(fit("final: "+truncate(oneLine(thread.Summary.LastFinal), width-7), width)))
+		rows = append(rows, lipgloss.NewStyle().Foreground(t.warn).Render(fit("final: "+truncate(reviewSummaryText(thread.Summary.LastFinal), width-7), width)))
 	}
 	if len(rows) > height {
 		rows = rows[:height]
@@ -772,29 +777,39 @@ func (m Model) commsPlainLines(width int) []commsLine {
 		if !event.Timestamp.IsZero() {
 			when = event.Timestamp.Format("15:04")
 		}
-		text := oneLine(event.Text)
-		if event.Kind == "final" {
-			text = "FINAL ANSWER: " + text
-		}
-		if event.Escalation {
-			text = "ESCALATION REQUESTED: " + strings.TrimPrefix(text, "ESCALATION REQUESTED ")
-		}
-		for j, wrapped := range wrap(text, max(20, width-16)) {
-			line := commsLine{
-				index:      len(lines),
-				kind:       event.Kind,
-				failed:     event.Failed,
-				escalation: event.Escalation,
+		texts := eventDisplayLines(event)
+		for i, text := range texts {
+			for j, wrapped := range wrap(text, max(20, width-16)) {
+				line := commsLine{
+					index:      len(lines),
+					kind:       event.Kind,
+					failed:     event.Failed,
+					escalation: event.Escalation,
+				}
+				if i == 0 && j == 0 {
+					line.text = fit(fmt.Sprintf("%s %-9s %s", when, prefix, wrapped), width)
+				} else {
+					line.text = fit(fmt.Sprintf("%s %-9s %s", "", "", wrapped), width)
+				}
+				lines = append(lines, line)
 			}
-			if j == 0 {
-				line.text = fit(fmt.Sprintf("%s %-9s %s", when, prefix, wrapped), width)
-			} else {
-				line.text = fit(fmt.Sprintf("%s %-9s %s", "", "", wrapped), width)
-			}
-			lines = append(lines, line)
 		}
 	}
 	return lines
+}
+
+func eventDisplayLines(event codex.Event) []string {
+	text := oneLine(event.Text)
+	if event.Kind == "final" {
+		if lines, ok := reviewAnswerLines(event.Text); ok {
+			return lines
+		}
+		text = "FINAL ANSWER: " + text
+	}
+	if event.Escalation {
+		text = "ESCALATION REQUESTED: " + strings.TrimPrefix(text, "ESCALATION REQUESTED ")
+	}
+	return []string{text}
 }
 
 func (m Model) commsContentWidth() int {

@@ -282,6 +282,51 @@ func TestReviewPromptMatchesExpectedStyle(t *testing.T) {
 	}
 }
 
+func TestReviewAnswerLinesParsesFindings(t *testing.T) {
+	lines, ok := reviewAnswerLines(`FINAL ANSWER: {"findings":[{"title":"[P2] Validate config before saving restore state","body":"A stale empty snapshot can be treated as complete.","confidence_score":0.86,"priority":2,"code_location":{"absolute_file_path":"/Users/parth/Documents/repos/ollama-launch-codex-app/cmd/launch/codex_app.go","line_range":{"start":76,"end":76}}}],"overall_correctness":"patch is incorrect","overall_explanation":"The restore snapshot can be poisoned.","overall_confidence_score":0.85}`)
+	if !ok {
+		t.Fatal("reviewAnswerLines returned !ok")
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"REVIEW REPORT: patch is incorrect  findings 1  confidence 0.85",
+		"P2 cmd/launch/codex_app.go:76 Validate config before saving restore state",
+		"why: A stale empty snapshot can be treated as complete.",
+		"overall: The restore snapshot can be poisoned.",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("review lines %q do not contain %q", joined, want)
+		}
+	}
+}
+
+func TestCommsPlainLinesFormatsReviewAnswer(t *testing.T) {
+	m := Model{
+		events: []codex.Event{
+			{
+				Kind: "final",
+				Text: `{"findings":[{"title":"[P3] Print Codex App restore guidance after setup","body":"The restore command is never shown.","confidence_score":0.88,"priority":3,"code_location":{"absolute_file_path":"/Users/parth/Documents/repos/ollama-launch-codex-app/cmd/launch/launch.go","line_range":{"start":780,"end":780}}}],"overall_correctness":"patch is incorrect","overall_explanation":"The guidance is easy to miss.","overall_confidence_score":0.85}`,
+			},
+		},
+	}
+
+	lines := m.commsPlainLines(180)
+	var rendered []string
+	for _, line := range lines {
+		rendered = append(rendered, line.text)
+	}
+	joined := strings.Join(rendered, "\n")
+	if !strings.Contains(joined, "REVIEW REPORT: patch is incorrect") {
+		t.Fatalf("rendered comms %q missing review report", joined)
+	}
+	if !strings.Contains(joined, "P3 cmd/launch/launch.go:780 Print Codex App restore guidance after setup") {
+		t.Fatalf("rendered comms %q missing parsed finding", joined)
+	}
+	if strings.Contains(joined, `"findings"`) || strings.Contains(joined, "FINAL ANSWER: {") {
+		t.Fatalf("rendered comms leaked raw JSON: %q", joined)
+	}
+}
+
 func TestReviewWorktreeDirSanitizesBranch(t *testing.T) {
 	got := reviewWorktreeDir("/Users/me/Documents/repos/project", "origin/feature/review_this")
 	want := "/Users/me/Documents/repos/project-feature-review_this"

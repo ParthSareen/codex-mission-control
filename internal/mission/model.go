@@ -1508,6 +1508,7 @@ func threadSearchText(thread codex.Thread) string {
 		summary.LastUser,
 		summary.LastAssistant,
 		summary.LastFinal,
+		reviewSummaryText(summary.LastFinal),
 		summary.LastEscalation,
 		summary.LastFailure,
 	}, "\n")
@@ -1518,6 +1519,7 @@ func threadSearchSnippet(thread codex.Thread, query string) string {
 		thread.Summary.LastUser,
 		thread.Summary.LastAssistant,
 		thread.Summary.LastFinal,
+		reviewSummaryText(thread.Summary.LastFinal),
 		thread.Summary.LastEscalation,
 		thread.Summary.LastFailure,
 		thread.CWD,
