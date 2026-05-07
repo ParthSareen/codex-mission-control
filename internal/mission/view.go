@@ -61,22 +61,34 @@ func (m Model) renderIntro() string {
 
 	title := lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render("CODEX MISSION CONTROL")
 	subtitle := lipgloss.NewStyle().Foreground(t.warn).Render("TACTICAL THREAD INTERFACE")
-	bootStyle := lipgloss.NewStyle().Foreground(t.dim)
-	hotStyle := lipgloss.NewStyle().Foreground(t.accent).Bold(true)
 	rows := []string{
 		title,
 		subtitle,
 		"",
 		strings.Join(scan, ""),
 		"",
-		bootStyle.Render("UPLINK     ") + hotStyle.Render("LOCKED"),
-		bootStyle.Render("COMMS      ") + hotStyle.Render("STREAMING"),
-		bootStyle.Render("REVIEWS    ") + hotStyle.Render("DECODED"),
-		bootStyle.Render("CONTROL    ") + hotStyle.Render("ONLINE"),
+		lipgloss.NewStyle().Foreground(t.dim).Render("PRE-FLIGHT CHECKS"),
+	}
+	checks := m.preflight
+	if len(checks) == 0 {
+		checks = defaultPreflightChecks()
+	}
+	rowBudget := max(3, m.height-14)
+	visibleChecks := min(len(checks), rowBudget)
+	if len(checks) > visibleChecks && visibleChecks > 1 {
+		visibleChecks--
+	}
+	for i := 0; i < visibleChecks; i++ {
+		rows = append(rows, m.renderPreflightCheck(checks[i], width-8))
+	}
+	if hidden := len(checks) - visibleChecks; hidden > 0 {
+		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fmt.Sprintf("... %d LOWER SYSTEMS QUEUED", hidden)))
+	}
+	rows = append(rows,
 		"",
 		lipgloss.NewStyle().Foreground(t.dim).Render("HOLDING AT MISSION GATE"),
 		lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render("PRESS ANY KEY TO ENTER CONTROL"),
-	}
+	)
 	content := strings.Join(rows, "\n")
 	panel := lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
@@ -85,6 +97,24 @@ func (m Model) renderIntro() string {
 		Padding(1, 3).
 		Render(content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
+}
+
+func (m Model) renderPreflightCheck(check preflightCheck, width int) string {
+	t := m.theme()
+	statusStyle := lipgloss.NewStyle().Foreground(t.dim)
+	switch check.Level {
+	case preflightOK:
+		statusStyle = statusStyle.Foreground(lipgloss.Color("46")).Bold(true)
+	case preflightWarn:
+		statusStyle = statusStyle.Foreground(lipgloss.Color("226")).Bold(true)
+	case preflightFail:
+		statusStyle = statusStyle.Foreground(lipgloss.Color("196")).Bold(true)
+	}
+	detailW := max(8, width-18)
+	name := lipgloss.NewStyle().Foreground(t.text).Render(fmt.Sprintf("%-10s", truncate(check.Name, 10)))
+	status := statusStyle.Render(fmt.Sprintf("%-4s", truncate(check.Status, 4)))
+	detail := lipgloss.NewStyle().Foreground(t.dim).Render(truncate(oneLine(check.Detail), detailW))
+	return lipgloss.NewStyle().Width(width).Render(name + "  " + status + "  " + detail)
 }
 
 func (m Model) renderHeader() string {

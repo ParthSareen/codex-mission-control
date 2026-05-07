@@ -70,6 +70,11 @@ position, intro splash preference, and seen final timestamps in
 skip the startup splash. When enabled, the splash stays up until you press a
 key.
 
+The startup splash runs quick pre-flight checks for Codex data, SQLite, recent
+rollout files, the Codex CLI, detached terminal launch support, Git, nvim
+Diffview, and Mission Control state persistence. Green is ready, yellow is
+non-blocking degraded mode, and red means a required system failed.
+
 Escalation requests, such as tool calls with
 `sandbox_permissions: "require_escalated"`, render as `ALERT`. Threads with a
 fresh final answer that you have not selected render as red `REVIEW` until

@@ -140,6 +140,38 @@ func TestIntroSplashWaitsForInput(t *testing.T) {
 	}
 }
 
+func TestDefaultPreflightChecksStartPending(t *testing.T) {
+	checks := defaultPreflightChecks()
+	if len(checks) == 0 {
+		t.Fatal("defaultPreflightChecks returned no checks")
+	}
+	for _, check := range checks {
+		if check.Level != preflightPending || check.Status != "WAIT" {
+			t.Fatalf("check %#v not pending", check)
+		}
+	}
+}
+
+func TestCodexDBPreflightFailsWhenMissing(t *testing.T) {
+	check := checkCodexDB(codex.NewStore(t.TempDir()))
+	if check.Level != preflightFail {
+		t.Fatalf("level = %v, want preflightFail", check.Level)
+	}
+	if check.Status != "FAIL" {
+		t.Fatalf("status = %q, want FAIL", check.Status)
+	}
+}
+
+func TestThreadsPreflightWarnsWhenEmpty(t *testing.T) {
+	check := checkThreads(nil, nil)
+	if check.Level != preflightWarn {
+		t.Fatalf("level = %v, want preflightWarn", check.Level)
+	}
+	if !strings.Contains(check.Detail, "no active") {
+		t.Fatalf("detail = %q, want no active", check.Detail)
+	}
+}
+
 func TestMarkSelectedSeenReportsChange(t *testing.T) {
 	finalAt := time.Date(2026, 5, 6, 22, 10, 30, 0, time.UTC)
 	m := Model{

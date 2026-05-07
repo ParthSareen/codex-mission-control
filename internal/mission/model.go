@@ -73,6 +73,7 @@ type Model struct {
 	restoreID   string
 	introSplash bool
 	introActive bool
+	preflight   []preflightCheck
 
 	askMode bool
 	ask     textinput.Model
@@ -126,6 +127,10 @@ type diffDoneMsg struct {
 
 type uiStateSavedMsg struct {
 	err error
+}
+
+type preflightMsg struct {
+	checks []preflightCheck
 }
 
 type missionDirChoice struct {
@@ -198,6 +203,7 @@ func New(codexHome string, limit int) Model {
 		themeIdx:     0,
 		introSplash:  true,
 		introActive:  true,
+		preflight:    defaultPreflightChecks(),
 		ask:          ti,
 		missionInput: mi,
 	}
@@ -230,7 +236,7 @@ func (m Model) RefreshNow() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(refreshCmd(m), tickEvery(260*time.Millisecond))
+	return tea.Batch(refreshCmd(m), preflightCmd(m), tickEvery(260*time.Millisecond))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -314,6 +320,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, refreshCmd(m)
 
 	case uiStateSavedMsg:
+		return m, nil
+
+	case preflightMsg:
+		if len(msg.checks) > 0 {
+			m.preflight = msg.checks
+		}
 		return m, nil
 
 	case gitStatusMsg:
