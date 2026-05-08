@@ -78,17 +78,18 @@ type Model struct {
 	askMode bool
 	ask     textinput.Model
 
-	missionMode             missionMode
-	missionInput            textinput.Model
-	missionDir              string
-	missionDirCursor        int
-	missionAllowCreate      bool
-	missionKindCursor       int
-	missionBranches         []string
-	missionBranchCursor     int
-	missionCurrentBranch    string
-	missionFetchingBranches bool
-	git                     gitSnapshot
+	missionMode               missionMode
+	missionInput              textinput.Model
+	missionDir                string
+	missionDirCursor          int
+	missionAllowCreate        bool
+	missionKindCursor         int
+	missionBranches           []string
+	missionBranchCursor       int
+	missionBranchFilterActive bool
+	missionCurrentBranch      string
+	missionFetchingBranches   bool
+	git                       gitSnapshot
 }
 
 type refreshMsg struct {
@@ -637,6 +638,7 @@ func (m *Model) startMission() {
 	m.missionKindCursor = 0
 	m.missionBranches = nil
 	m.missionBranchCursor = -1
+	m.missionBranchFilterActive = false
 	m.missionCurrentBranch = ""
 	m.missionFetchingBranches = false
 	m.missionInput.Prompt = "DIR> "
@@ -656,6 +658,7 @@ func (m *Model) startWorkspaceSearch() {
 	m.missionKindCursor = 0
 	m.missionBranches = nil
 	m.missionBranchCursor = -1
+	m.missionBranchFilterActive = false
 	m.missionCurrentBranch = ""
 	m.missionFetchingBranches = false
 	m.missionInput.Prompt = "FIND> "
@@ -816,10 +819,14 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	before := m.missionInput.Value()
 	m.missionInput, cmd = m.missionInput.Update(msg)
 	if m.missionMode == missionSelectDir {
 		m.clampMissionDirCursor()
 	} else if m.missionMode == missionReviewBranch {
+		if m.missionInput.Value() != before {
+			m.missionBranchFilterActive = true
+		}
 		m.syncMissionReviewBranchCursor()
 	}
 	return m, cmd
@@ -833,6 +840,7 @@ func (m *Model) cancelMission() {
 	m.missionKindCursor = 0
 	m.missionBranches = nil
 	m.missionBranchCursor = -1
+	m.missionBranchFilterActive = false
 	m.missionCurrentBranch = ""
 	m.missionFetchingBranches = false
 	m.missionInput.Blur()
@@ -844,6 +852,7 @@ func (m *Model) startMissionKind() {
 	m.missionKindCursor = 0
 	m.missionBranches = nil
 	m.missionBranchCursor = -1
+	m.missionBranchFilterActive = false
 	m.missionCurrentBranch = ""
 	m.missionFetchingBranches = false
 	m.missionInput.Blur()
@@ -854,6 +863,7 @@ func (m *Model) startMissionDescribe() {
 	m.missionMode = missionDescribe
 	m.missionBranches = nil
 	m.missionBranchCursor = -1
+	m.missionBranchFilterActive = false
 	m.missionCurrentBranch = ""
 	m.missionFetchingBranches = false
 	m.missionInput.Prompt = "MISSION> "
@@ -869,6 +879,7 @@ func (m *Model) startMissionReviewBranch() {
 	m.missionCurrentBranch = defaultBranch
 	m.missionBranches = reviewBranchChoices(m.missionDir, defaultBranch)
 	m.missionFetchingBranches = true
+	m.missionBranchFilterActive = false
 	m.status = "fetching branches..."
 	m.missionBranchCursor = indexOfString(m.missionBranches, defaultBranch)
 	if m.missionBranchCursor < 0 && len(m.missionBranches) > 0 {
@@ -885,6 +896,7 @@ func (m *Model) startMissionNewBranch() {
 	m.missionMode = missionNewBranch
 	m.missionBranches = nil
 	m.missionBranchCursor = -1
+	m.missionBranchFilterActive = false
 	m.missionCurrentBranch = ""
 	m.missionFetchingBranches = false
 	m.missionInput.Prompt = "NEW> "
@@ -984,7 +996,7 @@ func (m Model) visibleMissionBranches() []missionBranchChoice {
 
 func (m Model) missionBranchFilterQuery() string {
 	value := strings.ToLower(strings.TrimSpace(m.missionInput.Value()))
-	if value == "" || indexOfString(m.missionBranches, strings.TrimSpace(m.missionInput.Value())) >= 0 {
+	if value == "" || !m.missionBranchFilterActive {
 		return ""
 	}
 	return value

@@ -589,6 +589,7 @@ func TestReviewBranchSelectorFiltersAsYouType(t *testing.T) {
 	}
 
 	m.missionInput.SetValue("feature")
+	m.missionBranchFilterActive = true
 	m.syncMissionReviewBranchCursor()
 	visible := m.visibleMissionBranches()
 	if len(visible) != 2 || visible[0].branch != "feature/a" || visible[1].branch != "feature/b" {
@@ -604,6 +605,24 @@ func TestReviewBranchSelectorFiltersAsYouType(t *testing.T) {
 	}
 	if m.missionBranchCursor != 1 {
 		t.Fatalf("cursor after selecting filtered branch = %d, want original index 1", m.missionBranchCursor)
+	}
+}
+
+func TestReviewBranchSelectorKeepsTypedExactMatchFiltered(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	m.missionMode = missionReviewBranch
+	m.missionBranches = []string{"main", "feature/a", "feature/b", "origin/review-me"}
+	m.missionBranchCursor = 0
+	m.missionInput.SetValue("feature/a")
+	m.missionBranchFilterActive = true
+
+	m.syncMissionReviewBranchCursor()
+	visible := m.visibleMissionBranches()
+	if len(visible) != 1 || visible[0].branch != "feature/a" || visible[0].index != 1 {
+		t.Fatalf("visible exact typed branch = %#v, want only feature/a", visible)
+	}
+	if m.missionBranchCursor != 1 {
+		t.Fatalf("cursor = %d, want exact branch index 1", m.missionBranchCursor)
 	}
 }
 
