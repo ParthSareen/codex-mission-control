@@ -535,6 +535,44 @@ func TestReviewBranchMatchesCurrent(t *testing.T) {
 	}
 }
 
+func TestReviewBranchChoicesPreferCurrentAndSort(t *testing.T) {
+	got := reviewBranchChoicesFromList([]string{
+		"feature/z",
+		"main",
+		"feature/a",
+		"main",
+		"HEAD",
+	}, "feature/current")
+	want := []string{"feature/current", "feature/a", "feature/z", "main"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("choices = %#v, want %#v", got, want)
+	}
+}
+
+func TestReviewBranchSelectorUpdatesInput(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	m.missionMode = missionReviewBranch
+	m.missionBranches = []string{"main", "feature/a", "feature/b"}
+	m.missionBranchCursor = 0
+	m.missionInput.SetValue("main")
+
+	next, _ := m.handleMissionKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	if m.missionBranchCursor != 1 {
+		t.Fatalf("cursor = %d, want 1", m.missionBranchCursor)
+	}
+	if got := m.missionInput.Value(); got != "feature/a" {
+		t.Fatalf("input = %q, want feature/a", got)
+	}
+
+	m.missionInput.SetValue("custom/ref")
+	next, _ = m.handleMissionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = next.(Model)
+	if m.missionBranchCursor != -1 {
+		t.Fatalf("cursor after custom input = %d, want -1", m.missionBranchCursor)
+	}
+}
+
 func TestNewBranchWorktreeSpecUsesDuckyPattern(t *testing.T) {
 	spec, err := newBranchWorktreeSpec("/Users/me/Documents/repos/ollama", "cache/fix")
 	if err != nil {

@@ -78,13 +78,16 @@ type Model struct {
 	askMode bool
 	ask     textinput.Model
 
-	missionMode        missionMode
-	missionInput       textinput.Model
-	missionDir         string
-	missionDirCursor   int
-	missionAllowCreate bool
-	missionKindCursor  int
-	git                gitSnapshot
+	missionMode          missionMode
+	missionInput         textinput.Model
+	missionDir           string
+	missionDirCursor     int
+	missionAllowCreate   bool
+	missionKindCursor    int
+	missionBranches      []string
+	missionBranchCursor  int
+	missionCurrentBranch string
+	git                  gitSnapshot
 }
 
 type refreshMsg struct {
@@ -606,6 +609,9 @@ func (m *Model) startMission() {
 	m.missionDirCursor = 0
 	m.missionAllowCreate = true
 	m.missionKindCursor = 0
+	m.missionBranches = nil
+	m.missionBranchCursor = -1
+	m.missionCurrentBranch = ""
 	m.missionInput.Prompt = "DIR> "
 	m.missionInput.Placeholder = "Filter recent dirs or type a directory path..."
 	m.missionInput.SetValue("")
@@ -621,6 +627,9 @@ func (m *Model) startWorkspaceSearch() {
 	m.missionDirCursor = 0
 	m.missionAllowCreate = false
 	m.missionKindCursor = 0
+	m.missionBranches = nil
+	m.missionBranchCursor = -1
+	m.missionCurrentBranch = ""
 	m.missionInput.Prompt = "FIND> "
 	m.missionInput.Placeholder = "Search folders and worktrees..."
 	m.missionInput.SetValue("")
@@ -658,6 +667,10 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveMissionKind(1)
 			return m, nil
 		}
+		if m.missionMode == missionReviewBranch {
+			m.moveMissionReviewBranch(1)
+			return m, nil
+		}
 	case "up", "ctrl+k", "ctrl+p":
 		if m.missionMode == missionSelectDir {
 			m.moveMissionDir(-1)
@@ -665,6 +678,10 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.missionMode == missionSelectKind {
 			m.moveMissionKind(-1)
+			return m, nil
+		}
+		if m.missionMode == missionReviewBranch {
+			m.moveMissionReviewBranch(-1)
 			return m, nil
 		}
 	case "home":
@@ -676,6 +693,10 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.missionKindCursor = 0
 			return m, nil
 		}
+		if m.missionMode == missionReviewBranch && len(m.missionBranches) > 0 {
+			m.setMissionReviewBranch(0)
+			return m, nil
+		}
 	case "end":
 		if m.missionMode == missionSelectDir {
 			m.missionDirCursor = max(0, m.missionSelectChoiceCount()-1)
@@ -683,6 +704,10 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.missionMode == missionSelectKind {
 			m.missionKindCursor = max(0, len(missionKindChoices())-1)
+			return m, nil
+		}
+		if m.missionMode == missionReviewBranch && len(m.missionBranches) > 0 {
+			m.setMissionReviewBranch(len(m.missionBranches) - 1)
 			return m, nil
 		}
 	case "enter":
@@ -765,6 +790,8 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.missionInput, cmd = m.missionInput.Update(msg)
 	if m.missionMode == missionSelectDir {
 		m.clampMissionDirCursor()
+	} else if m.missionMode == missionReviewBranch {
+		m.syncMissionReviewBranchCursor()
 	}
 	return m, cmd
 }
@@ -775,6 +802,9 @@ func (m *Model) cancelMission() {
 	m.missionDirCursor = 0
 	m.missionAllowCreate = false
 	m.missionKindCursor = 0
+	m.missionBranches = nil
+	m.missionBranchCursor = -1
+	m.missionCurrentBranch = ""
 	m.missionInput.Blur()
 	m.missionInput.SetValue("")
 }
@@ -782,6 +812,9 @@ func (m *Model) cancelMission() {
 func (m *Model) startMissionKind() {
 	m.missionMode = missionSelectKind
 	m.missionKindCursor = 0
+	m.missionBranches = nil
+	m.missionBranchCursor = -1
+	m.missionCurrentBranch = ""
 	m.missionInput.Blur()
 	m.missionInput.SetValue("")
 }
@@ -797,15 +830,25 @@ func (m *Model) startMissionDescribe() {
 
 func (m *Model) startMissionReviewBranch() {
 	m.missionMode = missionReviewBranch
+	defaultBranch := currentReviewBranch(m.missionDir)
+	m.missionCurrentBranch = defaultBranch
+	m.missionBranches = reviewBranchChoices(m.missionDir, defaultBranch)
+	m.missionBranchCursor = indexOfString(m.missionBranches, defaultBranch)
+	if m.missionBranchCursor < 0 && len(m.missionBranches) > 0 {
+		m.missionBranchCursor = 0
+	}
 	m.missionInput.Prompt = "BRANCH> "
 	m.missionInput.Placeholder = "Paste branch/ref to review..."
-	m.missionInput.SetValue("")
+	m.missionInput.SetValue(defaultBranch)
 	m.missionInput.Width = max(20, m.width-10)
 	m.missionInput.Focus()
 }
 
 func (m *Model) startMissionNewBranch() {
 	m.missionMode = missionNewBranch
+	m.missionBranches = nil
+	m.missionBranchCursor = -1
+	m.missionCurrentBranch = ""
 	m.missionInput.Prompt = "NEW> "
 	m.missionInput.Placeholder = "Branch suffix, e.g. cache-fix..."
 	m.missionInput.SetValue("")
@@ -838,6 +881,35 @@ func (m *Model) moveMissionKind(delta int) {
 		return
 	}
 	m.missionKindCursor = max(0, min(len(choices)-1, m.missionKindCursor+delta))
+}
+
+func (m *Model) moveMissionReviewBranch(delta int) {
+	if len(m.missionBranches) == 0 {
+		m.missionBranchCursor = -1
+		return
+	}
+	current := m.missionBranchCursor
+	if current < 0 || current >= len(m.missionBranches) {
+		current = indexOfString(m.missionBranches, strings.TrimSpace(m.missionInput.Value()))
+	}
+	if current < 0 {
+		current = 0
+	} else {
+		current = max(0, min(len(m.missionBranches)-1, current+delta))
+	}
+	m.setMissionReviewBranch(current)
+}
+
+func (m *Model) setMissionReviewBranch(index int) {
+	if index < 0 || index >= len(m.missionBranches) {
+		return
+	}
+	m.missionBranchCursor = index
+	m.missionInput.SetValue(m.missionBranches[index])
+}
+
+func (m *Model) syncMissionReviewBranchCursor() {
+	m.missionBranchCursor = indexOfString(m.missionBranches, strings.TrimSpace(m.missionInput.Value()))
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -1359,6 +1431,43 @@ func localReviewBranchName(branch string) string {
 	branch = normalizeBranchInput(branch)
 	branch = strings.TrimPrefix(branch, "origin/")
 	return branch
+}
+
+func currentReviewBranch(repoDir string) string {
+	branch, err := gitOutput(repoDir, "branch", "--show-current")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(branch)
+}
+
+func reviewBranchChoices(repoDir, preferred string) []string {
+	out, err := gitOutput(repoDir, "branch", "--format=%(refname:short)")
+	if err != nil {
+		return reviewBranchChoicesFromList(nil, preferred)
+	}
+	return reviewBranchChoicesFromList(strings.Split(out, "\n"), preferred)
+}
+
+func reviewBranchChoicesFromList(branches []string, preferred string) []string {
+	preferred = strings.TrimSpace(preferred)
+	seen := make(map[string]bool)
+	var out []string
+	if preferred != "" {
+		out = append(out, preferred)
+		seen[preferred] = true
+	}
+	var rest []string
+	for _, branch := range branches {
+		branch = strings.TrimSpace(branch)
+		if branch == "" || branch == "HEAD" || seen[branch] {
+			continue
+		}
+		seen[branch] = true
+		rest = append(rest, branch)
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }
 
 func reviewWorktreeDir(repoRoot, branch string) string {
@@ -2156,6 +2265,15 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:8]
+}
+
+func indexOfString(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func age(ms int64, fallbackTime time.Time) string {

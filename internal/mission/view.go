@@ -314,12 +314,22 @@ func (m Model) renderMissionContent(width, height int) string {
 		rows = append(rows,
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("REVIEW BRANCH", width)),
 			kv("repo", m.missionDir, width),
-			lipgloss.NewStyle().Foreground(t.dim).Render(fit("creates a sibling worktree, computes merge base, then launches review", width)),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("uses this checkout if already on branch; otherwise reuses/creates a review worktree", width)),
 			"",
 			fit(m.missionInput.View(), width),
 			"",
-			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter creates worktree and launches review prompt; esc cancels", width)),
 		)
+		remaining := max(0, height-len(rows)-1)
+		for i, branch := range m.missionBranches {
+			if i >= remaining {
+				break
+			}
+			rows = append(rows, m.renderMissionBranchChoice(branch, i, width))
+		}
+		if len(m.missionBranches) == 0 && remaining > 0 {
+			rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("No local branches found; paste a branch/ref above.", width)))
+		}
+		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("up/down selects branch; edit field or paste ref; enter launches review; esc cancels", width)))
 	case missionNewBranch:
 		rows = append(rows,
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("NEW BRANCH WORKTREE", width)),
@@ -391,6 +401,22 @@ func (m Model) renderMissionDirChoice(choice missionDirChoice, index, width int)
 		}
 	}
 	label := fmt.Sprintf("%s %-8s %-22s %s", prefix, tag, truncate(filepathBase(choice.dir), 22), truncate(choice.dir, max(1, width-36)))
+	return style.Render(fit(label, width))
+}
+
+func (m Model) renderMissionBranchChoice(branch string, index, width int) string {
+	t := m.theme()
+	style := lipgloss.NewStyle().Foreground(t.text)
+	prefix := " "
+	if index == m.missionBranchCursor {
+		prefix = ">"
+		style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+	}
+	current := ""
+	if branch == m.missionCurrentBranch {
+		current = " current"
+	}
+	label := fmt.Sprintf("%s %-42s %s", prefix, truncate(branch, 42), current)
 	return style.Render(fit(label, width))
 }
 
