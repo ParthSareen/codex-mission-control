@@ -721,8 +721,8 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.missionKindCursor = 0
 			return m, nil
 		}
-		if m.missionMode == missionReviewBranch && len(m.missionBranches) > 0 {
-			m.setMissionReviewBranch(0)
+		if m.missionMode == missionReviewBranch {
+			m.selectVisibleMissionReviewBranch(0)
 			return m, nil
 		}
 	case "end":
@@ -734,8 +734,8 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.missionKindCursor = max(0, len(missionKindChoices())-1)
 			return m, nil
 		}
-		if m.missionMode == missionReviewBranch && len(m.missionBranches) > 0 {
-			m.setMissionReviewBranch(len(m.missionBranches) - 1)
+		if m.missionMode == missionReviewBranch {
+			m.selectVisibleMissionReviewBranch(len(m.visibleMissionBranches()) - 1)
 			return m, nil
 		}
 	case "enter":
@@ -922,20 +922,36 @@ func (m *Model) moveMissionKind(delta int) {
 }
 
 func (m *Model) moveMissionReviewBranch(delta int) {
-	if len(m.missionBranches) == 0 {
+	choices := m.visibleMissionBranches()
+	if len(choices) == 0 {
 		m.missionBranchCursor = -1
 		return
 	}
-	current := m.missionBranchCursor
-	if current < 0 || current >= len(m.missionBranches) {
-		current = indexOfString(m.missionBranches, strings.TrimSpace(m.missionInput.Value()))
+	current := -1
+	for i, choice := range choices {
+		if choice.index == m.missionBranchCursor {
+			current = i
+			break
+		}
 	}
 	if current < 0 {
-		current = 0
+		if delta < 0 {
+			current = len(choices) - 1
+		} else {
+			current = 0
+		}
 	} else {
-		current = max(0, min(len(m.missionBranches)-1, current+delta))
+		current = max(0, min(len(choices)-1, current+delta))
 	}
-	m.setMissionReviewBranch(current)
+	m.setMissionReviewBranch(choices[current].index)
+}
+
+func (m *Model) selectVisibleMissionReviewBranch(index int) {
+	choices := m.visibleMissionBranches()
+	if len(choices) == 0 || index < 0 || index >= len(choices) {
+		return
+	}
+	m.setMissionReviewBranch(choices[index].index)
 }
 
 func (m *Model) setMissionReviewBranch(index int) {
@@ -948,6 +964,30 @@ func (m *Model) setMissionReviewBranch(index int) {
 
 func (m *Model) syncMissionReviewBranchCursor() {
 	m.missionBranchCursor = indexOfString(m.missionBranches, strings.TrimSpace(m.missionInput.Value()))
+}
+
+type missionBranchChoice struct {
+	branch string
+	index  int
+}
+
+func (m Model) visibleMissionBranches() []missionBranchChoice {
+	query := m.missionBranchFilterQuery()
+	choices := make([]missionBranchChoice, 0, len(m.missionBranches))
+	for i, branch := range m.missionBranches {
+		if query == "" || strings.Contains(strings.ToLower(branch), query) {
+			choices = append(choices, missionBranchChoice{branch: branch, index: i})
+		}
+	}
+	return choices
+}
+
+func (m Model) missionBranchFilterQuery() string {
+	value := strings.ToLower(strings.TrimSpace(m.missionInput.Value()))
+	if value == "" || indexOfString(m.missionBranches, strings.TrimSpace(m.missionInput.Value())) >= 0 {
+		return ""
+	}
+	return value
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {

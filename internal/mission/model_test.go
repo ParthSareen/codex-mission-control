@@ -577,6 +577,36 @@ func TestReviewBranchSelectorUpdatesInput(t *testing.T) {
 	}
 }
 
+func TestReviewBranchSelectorFiltersAsYouType(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	m.missionMode = missionReviewBranch
+	m.missionBranches = []string{"main", "feature/a", "feature/b", "origin/review-me"}
+	m.missionBranchCursor = 0
+	m.missionInput.SetValue("main")
+
+	if got := m.visibleMissionBranches(); len(got) != 4 {
+		t.Fatalf("visible exact branch len = %d, want 4", len(got))
+	}
+
+	m.missionInput.SetValue("feature")
+	m.syncMissionReviewBranchCursor()
+	visible := m.visibleMissionBranches()
+	if len(visible) != 2 || visible[0].branch != "feature/a" || visible[1].branch != "feature/b" {
+		t.Fatalf("visible filtered branches = %#v, want feature/a and feature/b", visible)
+	}
+	if m.missionBranchCursor != -1 {
+		t.Fatalf("cursor while filtering = %d, want -1", m.missionBranchCursor)
+	}
+
+	m.moveMissionReviewBranch(1)
+	if got := m.missionInput.Value(); got != "feature/a" {
+		t.Fatalf("input after selecting filtered branch = %q, want feature/a", got)
+	}
+	if m.missionBranchCursor != 1 {
+		t.Fatalf("cursor after selecting filtered branch = %d, want original index 1", m.missionBranchCursor)
+	}
+}
+
 func TestReviewBranchesFetchedRefreshesSelectorNonBlocking(t *testing.T) {
 	m := New(t.TempDir(), 10)
 	m.missionMode = missionReviewBranch

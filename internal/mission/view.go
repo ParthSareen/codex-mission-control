@@ -320,17 +320,20 @@ func (m Model) renderMissionContent(width, height int) string {
 			fit(m.missionInput.View(), width),
 			"",
 		)
+		branches := m.visibleMissionBranches()
 		remaining := max(0, height-len(rows)-1)
-		for i, branch := range m.missionBranches {
+		for i, branch := range branches {
 			if i >= remaining {
 				break
 			}
-			rows = append(rows, m.renderMissionBranchChoice(branch, i, width))
+			rows = append(rows, m.renderMissionBranchChoice(branch.branch, branch.index, width))
 		}
 		if len(m.missionBranches) == 0 && remaining > 0 {
 			rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("No local branches found; paste a branch/ref above.", width)))
+		} else if len(branches) == 0 && remaining > 0 {
+			rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("No matching branches; edit filter or paste branch/ref above.", width)))
 		}
-		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("up/down selects branch; edit field or paste ref; enter launches review; esc cancels", width)))
+		rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("type to filter; up/down selects matching branch; enter launches review; esc cancels", width)))
 	case missionNewBranch:
 		rows = append(rows,
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("NEW BRANCH WORKTREE", width)),
