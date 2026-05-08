@@ -315,6 +315,7 @@ func (m Model) renderMissionContent(width, height int) string {
 			lipgloss.NewStyle().Foreground(t.primary).Bold(true).Render(fit("REVIEW BRANCH", width)),
 			kv("repo", m.missionDir, width),
 			lipgloss.NewStyle().Foreground(t.dim).Render(fit("uses this checkout if already on branch; otherwise reuses/creates a review worktree", width)),
+			m.renderBranchFetchStatus(width),
 			"",
 			fit(m.missionInput.View(), width),
 			"",
@@ -418,6 +419,14 @@ func (m Model) renderMissionBranchChoice(branch string, index, width int) string
 	}
 	label := fmt.Sprintf("%s %-42s %s", prefix, truncate(branch, 42), current)
 	return style.Render(fit(label, width))
+}
+
+func (m Model) renderBranchFetchStatus(width int) string {
+	t := m.theme()
+	if m.missionFetchingBranches {
+		return lipgloss.NewStyle().Foreground(t.warn).Render(fit("fetching remotes in background...", width))
+	}
+	return lipgloss.NewStyle().Foreground(t.dim).Render(fit("branch list includes local branches plus remote-only origin branches after fetch", width))
 }
 
 func (m Model) renderFleet(width, height int) string {

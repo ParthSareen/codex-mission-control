@@ -1,6 +1,7 @@
 package mission
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -539,11 +540,14 @@ func TestReviewBranchChoicesPreferCurrentAndSort(t *testing.T) {
 	got := reviewBranchChoicesFromList([]string{
 		"feature/z",
 		"main",
+		"origin/main",
+		"origin/remote-only",
 		"feature/a",
 		"main",
 		"HEAD",
+		"origin/HEAD",
 	}, "feature/current")
-	want := []string{"feature/current", "feature/a", "feature/z", "main"}
+	want := []string{"feature/current", "feature/a", "feature/z", "main", "origin/remote-only"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("choices = %#v, want %#v", got, want)
 	}
@@ -570,6 +574,57 @@ func TestReviewBranchSelectorUpdatesInput(t *testing.T) {
 	m = next.(Model)
 	if m.missionBranchCursor != -1 {
 		t.Fatalf("cursor after custom input = %d, want -1", m.missionBranchCursor)
+	}
+}
+
+func TestReviewBranchesFetchedRefreshesSelectorNonBlocking(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	m.missionMode = missionReviewBranch
+	m.missionDir = "/tmp/repo"
+	m.missionCurrentBranch = "main"
+	m.missionFetchingBranches = true
+	m.missionInput.SetValue("custom/ref")
+
+	next, _ := m.Update(reviewBranchesFetchedMsg{
+		dir: "/tmp/repo",
+		branches: []string{
+			"main",
+			"origin/main",
+			"origin/new-branch",
+		},
+	})
+	m = next.(Model)
+	if m.missionFetchingBranches {
+		t.Fatal("missionFetchingBranches = true, want false")
+	}
+	if got := strings.Join(m.missionBranches, "\n"); !strings.Contains(got, "custom/ref") || !strings.Contains(got, "origin/new-branch") {
+		t.Fatalf("branches = %#v, want custom/ref and origin/new-branch", m.missionBranches)
+	}
+	if m.missionBranchCursor != 0 {
+		t.Fatalf("cursor = %d, want custom ref selected at 0", m.missionBranchCursor)
+	}
+}
+
+func TestReviewBranchesFetchedFailureKeepsLocalList(t *testing.T) {
+	m := New(t.TempDir(), 10)
+	m.missionMode = missionReviewBranch
+	m.missionDir = "/tmp/repo"
+	m.missionBranches = []string{"main"}
+	m.missionFetchingBranches = true
+
+	next, _ := m.Update(reviewBranchesFetchedMsg{
+		dir: "/tmp/repo",
+		err: fmt.Errorf("network unavailable"),
+	})
+	m = next.(Model)
+	if m.missionFetchingBranches {
+		t.Fatal("missionFetchingBranches = true, want false")
+	}
+	if len(m.missionBranches) != 1 || m.missionBranches[0] != "main" {
+		t.Fatalf("branches changed on failure: %#v", m.missionBranches)
+	}
+	if !strings.Contains(m.status, "branch fetch warning") {
+		t.Fatalf("status = %q, want branch fetch warning", m.status)
 	}
 }
 
