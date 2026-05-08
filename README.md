@@ -4,7 +4,7 @@
   <img src="assets/cmc.png" alt="Codex Mission Control startup splash" width="900">
 </p>
 
-A green command-center TUI for watching local Codex Desktop/CLI threads.
+A command-center TUI for watching local Codex Desktop/CLI threads.
 
 It reads the same local artifacts as `codex-live`:
 
