@@ -1,0 +1,25 @@
+name: CodexSessionControl
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  bundleIdPrefix: com.parthsareen
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+targets:
+  CodexSessionControl:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources
+    resources:
+      - path: Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.parthsareen.CodexSessionControl
+        PRODUCT_NAME: Codex Control
+        INFOPLIST_FILE: Resources/Info.plist
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CURRENT_PROJECT_VERSION: 6
+        MARKETING_VERSION: 0.6

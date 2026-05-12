@@ -3,3 +3,6 @@
 /cmc
 *.test
 .DS_Store
+*.xcuserstate
+*.xcuserdata/
+xcuserdata/

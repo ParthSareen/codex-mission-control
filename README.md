@@ -11,9 +11,10 @@ It reads the same local artifacts as `codex-live`:
 - `~/.codex/state_5.sqlite`
 - `~/.codex/sessions/**/rollout-*.jsonl`
 
-The first version is file-backed, so it does not depend on the experimental
-app-server control socket being present. Control actions use the public Codex
-CLI, starting with `codex resume <thread-id>`.
+The TUI is file-backed, so it does not depend on the experimental app-server
+control socket being present. Local control actions use the public Codex CLI,
+starting with `codex resume <thread-id>`. The iOS bridge uses a persistent
+headless `codex app-server` process for prompts sent from the phone.
 
 ## Run
 
@@ -90,3 +91,34 @@ resume`; otherwise it opens a new Ghostty window. Ghostty launches use a surface
 configuration with the thread cwd and initial shell input so your normal shell
 and Ghostty integration stay in play. Tmux is used as a fallback when Ghostty
 scripting is unavailable inside a tmux session.
+
+## iOS companion
+
+The `ios/CodexSessionControl` project is a small SwiftUI app for selecting an
+existing thread, watching its latest rollout events, and sending a prompt from
+an iPhone or simulator. It talks to the Mac-side bridge:
+
+```sh
+go run ./cmd/cmc-bridge
+```
+
+Use Tailscale for a physical device:
+
+```sh
+go run ./cmd/cmc-bridge --tailscale
+```
+
+The bridge binds only to the Mac's Tailscale IPv4 address and prints the exact
+URL to enter in the iOS app.
+
+On the thread detail screen, the app polls the bridge every 5 seconds for the
+latest messages/events. You can send a prompt or command into the selected
+thread through the bridge's persistent headless `codex app-server`, and
+optionally override model plus reasoning speed for that turn.
+
+The app can also start a new chat. The bridge exposes a project picker rooted
+at `~/Documents/repos`, validates that the chosen directory stays under that
+root, then starts the new thread in the selected project. For git projects, the
+new-chat flow can use the selected folder, switch to an existing worktree, or
+create a new worktree from a selected branch before starting Codex. Use
+`--projects-root <path>` if your repo directory lives somewhere else.
