@@ -903,6 +903,31 @@ func (m Model) eventStyle(event codex.Event) (string, lipgloss.Style) {
 	}
 }
 
+func eventPrefix(event codex.Event) string {
+	switch event.Kind {
+	case "final":
+		return "FINAL"
+	case "user":
+		return "USER"
+	case "assistant":
+		return "CODEX"
+	case "tool-call":
+		if event.Escalation {
+			return "ESCALATE"
+		}
+		return "TOOL+"
+	case "tool":
+		if event.Failed {
+			return "TOOL!"
+		}
+		return "TOOL"
+	case "system":
+		return "SYS"
+	default:
+		return strings.ToUpper(event.Kind)
+	}
+}
+
 type commsLine struct {
 	index      int
 	kind       string
@@ -918,14 +943,59 @@ type eventLine struct {
 }
 
 func (m Model) commsPlainLines(width int) []commsLine {
-	events := visibleEvents(m.events)
+	if m.commsCacheValid(width) {
+		return m.commsCache.lines
+	}
+	return buildCommsPlainLines(m.events, width)
+}
+
+func (m *Model) ensureCommsCache() {
+	width := m.commsContentWidth()
+	if m.commsCacheValid(width) {
+		return
+	}
+	m.commsCache = commsLineCache{
+		threadID:   m.selectedThread().ID,
+		width:      width,
+		eventCount: len(m.events),
+		lines:      buildCommsPlainLines(m.events, width),
+	}
+	if last := lastEvent(m.events); last != nil {
+		m.commsCache.lastAt = last.Timestamp
+		m.commsCache.lastKind = last.Kind
+		m.commsCache.lastTextLen = len(last.Text)
+	}
+}
+
+func (m Model) commsCacheValid(width int) bool {
+	if m.commsCache.threadID != m.selectedThread().ID || m.commsCache.width != width || m.commsCache.eventCount != len(m.events) {
+		return false
+	}
+	last := lastEvent(m.events)
+	if last == nil {
+		return m.commsCache.lastAt.IsZero() && m.commsCache.lastKind == "" && m.commsCache.lastTextLen == 0
+	}
+	return m.commsCache.lastAt.Equal(last.Timestamp) &&
+		m.commsCache.lastKind == last.Kind &&
+		m.commsCache.lastTextLen == len(last.Text)
+}
+
+func lastEvent(events []codex.Event) *codex.Event {
+	if len(events) == 0 {
+		return nil
+	}
+	return &events[len(events)-1]
+}
+
+func buildCommsPlainLines(events []codex.Event, width int) []commsLine {
+	events = visibleEvents(events)
 	start := 0
 	if len(events) > 120 {
 		start = len(events) - 120
 	}
 	var lines []commsLine
 	for _, event := range events[start:] {
-		prefix, _ := m.eventStyle(event)
+		prefix := eventPrefix(event)
 		when := "--:--"
 		if !event.Timestamp.IsZero() {
 			when = event.Timestamp.Format("15:04")

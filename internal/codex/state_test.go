@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -39,6 +40,61 @@ func TestParseLineDoesNotEscalateLiteralSearch(t *testing.T) {
 	}
 }
 
+func TestLoadThreadEventsCachedReusesUnchangedRollout(t *testing.T) {
+	path := t.TempDir() + "/rollout.jsonl"
+	if err := os.WriteFile(path, []byte(rolloutLine(t, "real")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := RolloutCache{
+		path: {
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+			Events:  []Event{{Kind: "assistant", Text: "cached"}},
+		},
+	}
+
+	events, nextCache := NewStore("").LoadThreadEventsCached(Thread{RolloutPath: path}, 260, cache)
+	if len(events) != 1 || events[0].Text != "cached" {
+		t.Fatalf("events = %#v, want cached event", events)
+	}
+	if len(nextCache) != 1 || nextCache[path].Events[0].Text != "cached" {
+		t.Fatalf("next cache = %#v, want cached event retained", nextCache)
+	}
+}
+
+func TestLoadThreadEventsCachedReloadsChangedRollout(t *testing.T) {
+	path := t.TempDir() + "/rollout.jsonl"
+	if err := os.WriteFile(path, []byte(rolloutLine(t, "first")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := RolloutCache{
+		path: {
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+			Events:  []Event{{Kind: "assistant", Text: "stale"}},
+		},
+	}
+	if err := os.WriteFile(path, []byte(rolloutLine(t, "first")+"\n"+rolloutLine(t, "second")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	events, nextCache := NewStore("").LoadThreadEventsCached(Thread{RolloutPath: path}, 260, cache)
+	if len(events) != 2 || events[1].Text != "second" {
+		t.Fatalf("events = %#v, want reloaded rollout with second event", events)
+	}
+	if len(nextCache) != 1 || nextCache[path].Events[0].Text == "stale" {
+		t.Fatalf("next cache = %#v, want refreshed events", nextCache)
+	}
+}
+
 func responseItemLine(t *testing.T, args map[string]any) string {
 	t.Helper()
 	argsJSON, err := json.Marshal(args)
@@ -52,6 +108,22 @@ func responseItemLine(t *testing.T, args map[string]any) string {
 			"type":      "function_call",
 			"name":      "exec_command",
 			"arguments": string(argsJSON),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
+func rolloutLine(t *testing.T, message string) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"timestamp": "2026-05-07T00:00:00Z",
+		"type":      "event_msg",
+		"payload": map[string]any{
+			"type":    "agent_message",
+			"message": message,
 		},
 	})
 	if err != nil {

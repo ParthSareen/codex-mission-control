@@ -20,6 +20,7 @@ import (
 )
 
 const reviewBaseBranch = "main"
+const gitRefreshInterval = 5 * time.Second
 
 type screenMode int
 
@@ -48,32 +49,35 @@ const (
 )
 
 type Model struct {
-	store       codex.Store
-	limit       int
-	width       int
-	height      int
-	threads     []codex.Thread
-	events      []codex.Event
-	selected    int
-	mode        screenMode
-	focus       focusTarget
-	commsScroll int
-	commsCursor int
-	visualMode  bool
-	visualStart int
-	seenFinals  map[string]time.Time
-	themeIdx    int
-	paused      bool
-	tick        int
-	lastUpdate  time.Time
-	err         string
-	status      string
-	threadOrder map[string]int
-	nextOrder   int
-	restoreID   string
-	introSplash bool
-	introActive bool
-	preflight   []preflightCheck
+	store        codex.Store
+	limit        int
+	width        int
+	height       int
+	threads      []codex.Thread
+	events       []codex.Event
+	selected     int
+	mode         screenMode
+	focus        focusTarget
+	commsScroll  int
+	commsCursor  int
+	visualMode   bool
+	visualStart  int
+	seenFinals   map[string]time.Time
+	themeIdx     int
+	paused       bool
+	tick         int
+	lastUpdate   time.Time
+	err          string
+	status       string
+	threadOrder  map[string]int
+	nextOrder    int
+	rolloutCache codex.RolloutCache
+	gitCache     map[string]gitCacheEntry
+	commsCache   commsLineCache
+	restoreID    string
+	introSplash  bool
+	introActive  bool
+	preflight    []preflightCheck
 
 	askMode bool
 	ask     textinput.Model
@@ -93,14 +97,18 @@ type Model struct {
 }
 
 type refreshMsg struct {
-	threads []codex.Thread
-	events  []codex.Event
-	git     gitSnapshot
-	err     error
+	threads        []codex.Thread
+	events         []codex.Event
+	eventsThreadID string
+	git            gitSnapshot
+	rolloutCache   codex.RolloutCache
+	gitCache       map[string]gitCacheEntry
+	err            error
 }
 
 type gitStatusMsg struct {
-	git gitSnapshot
+	git       gitSnapshot
+	checkedAt time.Time
 }
 
 type newBranchDoneMsg struct {
@@ -178,6 +186,21 @@ type gitSnapshot struct {
 	Loaded    bool
 }
 
+type gitCacheEntry struct {
+	snapshot  gitSnapshot
+	checkedAt time.Time
+}
+
+type commsLineCache struct {
+	threadID    string
+	width       int
+	eventCount  int
+	lastAt      time.Time
+	lastKind    string
+	lastTextLen int
+	lines       []commsLine
+}
+
 type persistedUIState struct {
 	Theme          string            `json:"theme"`
 	ThemeIndex     int               `json:"theme_index"`
@@ -211,6 +234,7 @@ func New(codexHome string, limit int) Model {
 		height:       34,
 		seenFinals:   make(map[string]time.Time),
 		threadOrder:  make(map[string]int),
+		gitCache:     make(map[string]gitCacheEntry),
 		themeIdx:     0,
 		introSplash:  true,
 		introActive:  true,
@@ -232,16 +256,19 @@ func (m Model) WithSize(width, height int) Model {
 }
 
 func (m Model) RefreshNow() Model {
-	threads, err := m.store.LoadThreads(m.limit)
+	threads, cache, err := m.store.LoadThreadsCached(m.limit, m.rolloutCache)
 	if err != nil {
 		m.err = err.Error()
 		return m
 	}
+	m.rolloutCache = cache
 	m.threads = threads
 	m.observeThreadOrder()
 	m.restorePreferredSelection("")
-	m.events = m.selectedEvents()
+	m.events = m.loadSelectedEvents()
 	m.git = loadGitSnapshot(m.selectedThread().CWD)
+	m.cacheGitSnapshot(m.git, time.Now())
+	m.ensureCommsCache()
 	m.lastUpdate = time.Now()
 	return m
 }
@@ -261,10 +288,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.missionInput.Width > m.width-10 {
 			m.missionInput.Width = max(20, m.width-10)
 		}
+		m.ensureCommsCache()
 		return m, nil
 
 	case tickMsg:
 		m.tick++
+		m.ensureCommsCache()
 		cmds := []tea.Cmd{tickEvery(260 * time.Millisecond)}
 		if !m.paused && m.tick%4 == 0 {
 			cmds = append(cmds, refreshCmd(m))
@@ -277,14 +306,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		prevID := m.selectedThread().ID
+		if msg.rolloutCache != nil {
+			m.rolloutCache = msg.rolloutCache
+		}
+		if msg.gitCache != nil {
+			m.gitCache = msg.gitCache
+		}
 		m.threads = msg.threads
 		m.observeThreadOrder()
 		m.restorePreferredSelection(prevID)
 		if m.selectedThread().ID != prevID {
 			m.resetCommsPosition()
 		}
-		m.events = m.selectedEvents()
-		m.git = msg.git
+		if msg.eventsThreadID == m.selectedThread().ID {
+			m.events = msg.events
+		} else {
+			m.events = m.loadSelectedEvents()
+		}
+		if msg.git.CWD == normalizeDir(m.selectedThread().CWD) {
+			m.git = msg.git
+		}
+		m.ensureCommsCache()
 		seenChanged := false
 		if m.mode == modeFocus {
 			seenChanged = m.markSelectedSeen()
@@ -359,6 +401,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case gitStatusMsg:
+		m.cacheGitSnapshot(msg.git, msg.checkedAt)
 		if msg.git.CWD == normalizeDir(m.selectedThread().CWD) {
 			m.git = msg.git
 		}
@@ -425,6 +468,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func persistAfterUpdate(model tea.Model, cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	if m, ok := model.(Model); ok {
+		m.ensureCommsCache()
 		return m, tea.Batch(cmd, saveUIStateCmd(m))
 	}
 	return model, cmd
@@ -501,7 +545,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selected++
 		m.clampSelection()
-		m.events = m.selectedEvents()
+		m.events = m.loadSelectedEvents()
 		if m.mode == modeFocus {
 			m.markSelectedSeen()
 		}
@@ -518,7 +562,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selected--
 		m.clampSelection()
-		m.events = m.selectedEvents()
+		m.events = m.loadSelectedEvents()
 		if m.mode == modeFocus {
 			m.markSelectedSeen()
 		}
@@ -534,7 +578,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selected = 0
-		m.events = m.selectedEvents()
+		m.events = m.loadSelectedEvents()
 		if m.mode == modeFocus {
 			m.markSelectedSeen()
 		}
@@ -552,7 +596,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selected = len(m.threads) - 1
 		m.clampSelection()
-		m.events = m.selectedEvents()
+		m.events = m.loadSelectedEvents()
 		if m.mode == modeFocus {
 			m.markSelectedSeen()
 		}
@@ -1085,7 +1129,7 @@ func (m *Model) selectFleetEntry(index int) {
 		return
 	}
 	m.selected = entries[index].threadIndex
-	m.events = m.selectedEvents()
+	m.events = m.loadSelectedEvents()
 	m.resetCommsPosition()
 }
 
@@ -1094,7 +1138,7 @@ func (m *Model) openSearchThread(index int) {
 		return
 	}
 	m.selected = index
-	m.events = m.selectedEvents()
+	m.events = m.loadSelectedEvents()
 	m.mode = modeFocus
 	m.focus = focusComms
 	m.git = gitSnapshot{CWD: normalizeDir(m.selectedThread().CWD)}
@@ -1104,31 +1148,43 @@ func (m *Model) openSearchThread(index int) {
 }
 
 func refreshCmd(m Model) tea.Cmd {
+	rolloutCache := m.rolloutCache.Clone()
+	gitCache := cloneGitCache(m.gitCache)
+	preferredID := m.selectedThread().ID
+	if m.restoreID != "" {
+		preferredID = m.restoreID
+	}
+	fallbackIndex := m.selected
 	return func() tea.Msg {
-		threads, err := m.store.LoadThreads(m.limit)
+		threads, nextRolloutCache, err := m.store.LoadThreadsCached(m.limit, rolloutCache)
 		if err != nil {
 			return refreshMsg{err: err}
 		}
-		selected := m.selected
-		if selected >= len(threads) {
-			selected = len(threads) - 1
-		}
-		if selected < 0 {
-			selected = 0
-		}
+		selected := selectedThreadIndex(threads, preferredID, fallbackIndex)
 		var events []codex.Event
+		var eventsThreadID string
 		var git gitSnapshot
+		nextGitCache := gitCache
 		if len(threads) > 0 {
-			events = m.store.LoadThreadEvents(threads[selected], 260)
-			git = loadGitSnapshot(threads[selected].CWD)
+			thread := threads[selected]
+			eventsThreadID = thread.ID
+			events, nextRolloutCache = m.store.LoadThreadEventsCached(thread, 260, nextRolloutCache)
+			git, nextGitCache = loadGitSnapshotCached(thread.CWD, nextGitCache, gitRefreshInterval)
 		}
-		return refreshMsg{threads: threads, events: events, git: git}
+		return refreshMsg{
+			threads:        threads,
+			events:         events,
+			eventsThreadID: eventsThreadID,
+			git:            git,
+			rolloutCache:   nextRolloutCache,
+			gitCache:       nextGitCache,
+		}
 	}
 }
 
 func gitStatusCmd(thread codex.Thread) tea.Cmd {
 	return func() tea.Msg {
-		return gitStatusMsg{git: loadGitSnapshot(thread.CWD)}
+		return gitStatusMsg{git: loadGitSnapshot(thread.CWD), checkedAt: time.Now()}
 	}
 }
 
@@ -1449,6 +1505,44 @@ func loadGitSnapshot(cwd string) gitSnapshot {
 		parseGitStatusLine(&snapshot, line)
 	}
 	return snapshot
+}
+
+func loadGitSnapshotCached(cwd string, cache map[string]gitCacheEntry, ttl time.Duration) (gitSnapshot, map[string]gitCacheEntry) {
+	cwd = normalizeDir(cwd)
+	if cache == nil {
+		cache = make(map[string]gitCacheEntry)
+	}
+	now := time.Now()
+	if entry, ok := cache[cwd]; ok && now.Sub(entry.checkedAt) < ttl {
+		return entry.snapshot, cache
+	}
+	snapshot := loadGitSnapshot(cwd)
+	cache[cwd] = gitCacheEntry{snapshot: snapshot, checkedAt: now}
+	return snapshot, cache
+}
+
+func cloneGitCache(cache map[string]gitCacheEntry) map[string]gitCacheEntry {
+	if len(cache) == 0 {
+		return nil
+	}
+	next := make(map[string]gitCacheEntry, len(cache))
+	for cwd, entry := range cache {
+		next[cwd] = entry
+	}
+	return next
+}
+
+func (m *Model) cacheGitSnapshot(snapshot gitSnapshot, checkedAt time.Time) {
+	if strings.TrimSpace(snapshot.CWD) == "" {
+		return
+	}
+	if checkedAt.IsZero() {
+		checkedAt = time.Now()
+	}
+	if m.gitCache == nil {
+		m.gitCache = make(map[string]gitCacheEntry)
+	}
+	m.gitCache[normalizeDir(snapshot.CWD)] = gitCacheEntry{snapshot: snapshot, checkedAt: checkedAt}
 }
 
 func parseGitBranchLine(snapshot *gitSnapshot, line string) {
@@ -1895,11 +1989,41 @@ func (m *Model) restorePreferredSelection(fallbackID string) {
 	m.restoreSelection(id)
 }
 
+func selectedThreadIndex(threads []codex.Thread, preferredID string, fallbackIndex int) int {
+	if len(threads) == 0 {
+		return 0
+	}
+	if preferredID != "" {
+		for i, thread := range threads {
+			if thread.ID == preferredID {
+				return i
+			}
+		}
+	}
+	if fallbackIndex < 0 {
+		return 0
+	}
+	if fallbackIndex >= len(threads) {
+		return len(threads) - 1
+	}
+	return fallbackIndex
+}
+
 func (m Model) selectedThread() codex.Thread {
 	if len(m.threads) == 0 || m.selected < 0 || m.selected >= len(m.threads) {
 		return codex.Thread{}
 	}
 	return m.threads[m.selected]
+}
+
+func (m *Model) loadSelectedEvents() []codex.Event {
+	thread := m.selectedThread()
+	if thread.ID == "" {
+		return nil
+	}
+	events, cache := m.store.LoadThreadEventsCached(thread, 260, m.rolloutCache)
+	m.rolloutCache = cache
+	return events
 }
 
 func (m Model) selectedEvents() []codex.Event {

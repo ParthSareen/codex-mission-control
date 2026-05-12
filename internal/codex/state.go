@@ -62,6 +62,25 @@ type Store struct {
 	Home string
 }
 
+type RolloutCache map[string]RolloutCacheEntry
+
+type RolloutCacheEntry struct {
+	Size    int64
+	ModTime time.Time
+	Events  []Event
+}
+
+func (c RolloutCache) Clone() RolloutCache {
+	if len(c) == 0 {
+		return nil
+	}
+	next := make(RolloutCache, len(c))
+	for path, entry := range c {
+		next[path] = entry
+	}
+	return next
+}
+
 func NewStore(home string) Store {
 	return Store{Home: expandHome(home)}
 }
@@ -71,12 +90,17 @@ func (s Store) StateDB() string {
 }
 
 func (s Store) LoadThreads(limit int) ([]Thread, error) {
+	threads, _, err := s.LoadThreadsCached(limit, nil)
+	return threads, err
+}
+
+func (s Store) LoadThreadsCached(limit int, cache RolloutCache) ([]Thread, RolloutCache, error) {
 	if limit <= 0 {
 		limit = 28
 	}
 	db := s.StateDB()
 	if _, err := os.Stat(db); err != nil {
-		return nil, fmt.Errorf("state db not found: %s", db)
+		return nil, cache, fmt.Errorf("state db not found: %s", db)
 	}
 
 	sql := fmt.Sprintf(`
@@ -99,9 +123,10 @@ limit %d;`, limit)
 
 	var rows []threadRow
 	if err := sqliteJSON(db, sql, &rows); err != nil {
-		return nil, err
+		return nil, cache, err
 	}
 
+	nextCache := make(RolloutCache, len(rows))
 	threads := make([]Thread, 0, len(rows))
 	for _, row := range rows {
 		thread := Thread{
@@ -117,18 +142,28 @@ limit %d;`, limit)
 			UpdatedAtMS:   row.UpdatedAtMS,
 			TokensUsed:    row.TokensUsed,
 		}
-		thread.Summary = SummarizeEvents(LoadEvents(thread.RolloutPath, 220))
+		events := loadEventsCached(thread.RolloutPath, cache, nextCache)
+		thread.Summary = SummarizeEvents(limitEvents(events, 220))
 		threads = append(threads, thread)
 	}
 
 	sort.SliceStable(threads, func(i, j int) bool {
 		return heat(threads[i]) > heat(threads[j])
 	})
-	return threads, nil
+	return threads, nextCache, nil
 }
 
 func (s Store) LoadThreadEvents(thread Thread, limit int) []Event {
 	return LoadEvents(thread.RolloutPath, limit)
+}
+
+func (s Store) LoadThreadEventsCached(thread Thread, limit int, cache RolloutCache) ([]Event, RolloutCache) {
+	nextCache := cache.Clone()
+	if nextCache == nil {
+		nextCache = make(RolloutCache, 1)
+	}
+	events := loadEventsCached(thread.RolloutPath, cache, nextCache)
+	return limitEvents(events, limit), nextCache
 }
 
 type threadRow struct {
@@ -170,6 +205,10 @@ func LoadEvents(rolloutPath string, limit int) []Event {
 	if rolloutPath == "" {
 		return nil
 	}
+	return limitEvents(loadEvents(rolloutPath), limit)
+}
+
+func loadEvents(rolloutPath string) []Event {
 	lines, err := tailLines(rolloutPath, tailBytes)
 	if err != nil {
 		return nil
@@ -180,8 +219,33 @@ func LoadEvents(rolloutPath string, limit int) []Event {
 			events = append(events, event)
 		}
 	}
+	return events
+}
+
+func loadEventsCached(rolloutPath string, cache, nextCache RolloutCache) []Event {
+	if rolloutPath == "" {
+		return nil
+	}
+	info, err := os.Stat(rolloutPath)
+	if err != nil {
+		return nil
+	}
+	if entry, ok := cache[rolloutPath]; ok && entry.Size == info.Size() && entry.ModTime.Equal(info.ModTime()) {
+		nextCache[rolloutPath] = entry
+		return entry.Events
+	}
+	events := loadEvents(rolloutPath)
+	nextCache[rolloutPath] = RolloutCacheEntry{
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+		Events:  events,
+	}
+	return events
+}
+
+func limitEvents(events []Event, limit int) []Event {
 	if limit > 0 && len(events) > limit {
-		events = events[len(events)-limit:]
+		return events[len(events)-limit:]
 	}
 	return events
 }
