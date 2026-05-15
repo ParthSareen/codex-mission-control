@@ -1,6 +1,8 @@
 package mission
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +34,94 @@ func TestDisplayStatusMarksUnseenFinalForReview(t *testing.T) {
 	if got := m.displayStatus(thread); got != "FINAL" {
 		t.Fatalf("seen final status = %q, want FINAL", got)
 	}
+}
+
+func TestDisplayStatusMarksPendingCodexApprovalAlert(t *testing.T) {
+	broker := newCodexApprovalBroker(true)
+	m := Model{
+		approvals: broker,
+		threads: []codex.Thread{{
+			ID:  "thread-one",
+			CWD: "/tmp/work",
+		}},
+	}
+
+	result := make(chan codexApprovalDecision, 1)
+	go func() {
+		result <- broker.Request(context.Background(), "item/commandExecution/requestApproval", json.RawMessage(`{
+			"threadId":"thread-one",
+			"turnId":"turn-one",
+			"itemId":"item-one",
+			"command":"git commit --allow-empty -m test",
+			"cwd":"/tmp/work"
+		}`))
+	}()
+	waitForModelApprovals(t, &m, 1)
+	defer broker.SetEnabled(false)
+
+	if got := m.displayStatus(m.threads[0]); got != "ALERT" {
+		t.Fatalf("status = %q, want ALERT", got)
+	}
+
+	_, _, _ = broker.Decide(m.codexApprovals[0].ID, "deny")
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for approval cleanup")
+	}
+}
+
+func TestDecideSelectedCodexApprovalUnblocksBroker(t *testing.T) {
+	broker := newCodexApprovalBroker(true)
+	m := Model{
+		approvals: broker,
+		threads: []codex.Thread{{
+			ID:  "thread-one",
+			CWD: "/tmp/work",
+		}},
+	}
+
+	result := make(chan codexApprovalDecision, 1)
+	go func() {
+		result <- broker.Request(context.Background(), "item/commandExecution/requestApproval", json.RawMessage(`{
+			"threadId":"thread-one",
+			"turnId":"turn-one",
+			"itemId":"item-one",
+			"command":"git commit --allow-empty -m test",
+			"cwd":"/tmp/work"
+		}`))
+	}()
+	waitForModelApprovals(t, &m, 1)
+
+	m.decideSelectedCodexApproval("approve")
+
+	select {
+	case decision := <-result:
+		if decision != codexApprovalApprove {
+			t.Fatalf("decision = %q, want approve", decision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for approval decision")
+	}
+	if len(m.codexApprovals) != 0 {
+		t.Fatalf("approvals = %#v, want empty", m.codexApprovals)
+	}
+	if !strings.Contains(m.status, "approved Codex command") {
+		t.Fatalf("status = %q, want approved Codex command", m.status)
+	}
+}
+
+func waitForModelApprovals(t *testing.T, m *Model, count int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		m.syncCodexApprovals()
+		if len(m.codexApprovals) == count {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("approvals = %#v, want %d", m.codexApprovals, count)
 }
 
 func TestFleetSelectionDoesNotMarkFinalSeen(t *testing.T) {
@@ -283,6 +373,112 @@ func TestJumpFleetCallsignUsesFleetOrder(t *testing.T) {
 	}
 }
 
+func TestThreadTaskDetectsTaskKinds(t *testing.T) {
+	cases := []struct {
+		name   string
+		thread codex.Thread
+		code   string
+	}{
+		{
+			name: "review prompt beats source",
+			thread: codex.Thread{
+				Source: "cli",
+				Summary: codex.Summary{
+					LastUser: "Please review changes on parth-launch-codex-app against origin/main",
+				},
+			},
+			code: "[R]",
+		},
+		{
+			name:   "mission cli",
+			thread: codex.Thread{Source: "cli", Title: "Build sync hook"},
+			code:   "[M]",
+		},
+		{
+			name:   "app",
+			thread: codex.Thread{Source: "vscode", Title: "Build Codex sync hook"},
+			code:   "[A]",
+		},
+		{
+			name:   "subagent",
+			thread: codex.Thread{Source: `{"subagent":{"thread_spawn":{"agent_role":"worker"}}}`},
+			code:   "[S]",
+		},
+		{
+			name:   "exec",
+			thread: codex.Thread{Source: "exec"},
+			code:   "[X]",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := threadTask(tc.thread).code; got != tc.code {
+				t.Fatalf("threadTask code = %q, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestRenderThreadsShowsTaskLegendAndIndicators(t *testing.T) {
+	m := Model{
+		seenFinals: map[string]time.Time{},
+		threads: []codex.Thread{
+			{
+				ID:     "review",
+				Title:  "Review branch",
+				Source: "cli",
+				Summary: codex.Summary{
+					LastUser: "Review the code changes against the base branch 'origin/main'.",
+				},
+			},
+			{ID: "mission", Title: "Build sync hook", Source: "cli"},
+			{ID: "app", Title: "App thread", Source: "vscode"},
+		},
+	}
+
+	got := m.renderThreads(44, 8)
+	for _, want := range []string{
+		"TYPE R=rev M=mis A=app",
+		"S=sub X=exec ?=other",
+		"[R] IDLE",
+		"[M] IDLE",
+		"[A] IDLE",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered threads %q missing %q", got, want)
+		}
+	}
+}
+
+func TestRenderRadarUsesTaskGlyphs(t *testing.T) {
+	m := Model{
+		seenFinals: map[string]time.Time{},
+		threads: []codex.Thread{
+			{
+				ID:     "review",
+				Source: "cli",
+				Summary: codex.Summary{
+					LastUser: "Please review changes on branch against origin/main",
+				},
+			},
+			{ID: "mission", Source: "cli"},
+			{ID: "app", Source: "vscode"},
+			{ID: "sub", Source: `{"subagent":{"thread_spawn":{"agent_role":"worker"}}}`},
+			{ID: "exec", Source: "exec"},
+		},
+	}
+
+	got := m.renderRadar(48)
+	for _, want := range []string{"R", "M", "A", "S", "X"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("radar %q missing task glyph %q", got, want)
+		}
+	}
+	if strings.Contains(got, "!") || strings.Contains(got, "F") || strings.Contains(got, "+") {
+		t.Fatalf("radar %q used old status glyphs", got)
+	}
+}
+
 func TestCodexResumeShellLineQuotesCWDAndPrompt(t *testing.T) {
 	thread := codex.Thread{
 		ID:  "thread'one",
@@ -320,11 +516,14 @@ func TestCodexNewMissionShellLineQuotesCWDAndPrompt(t *testing.T) {
 
 func TestCodexReviewShellLineRunsReview(t *testing.T) {
 	mergeBase := "7c2c36bda271075b95513b7009d4df007bbfa497"
-	line := codexReviewShellLine("/tmp/review tree", "main", mergeBase)
+	line := codexReviewShellLine("/tmp/review tree", "parth-launch-codex-app", "origin/main", mergeBase)
 
 	for _, want := range []string{
 		"cd '/tmp/review tree'",
-		"codex 'Review the code changes against the base branch '\"'\"'main'\"'\"'. The merge base commit for this comparison is 7c2c36bda271075b95513b7009d4df007bbfa497. Run `git diff 7c2c36bda271075b95513b7009d4df007bbfa497` to inspect the changes relative to main. Provide prioritized, actionable findings.'",
+		"codex '# Review Guidelines",
+		"Do not return JSON, XML, a findings object, or any structured review schema.",
+		"Run `git diff 7c2c36bda271075b95513b7009d4df007bbfa497`",
+		"Please review changes on parth-launch-codex-app against origin/main.",
 		"printf '\\n[codex exited - press enter or close this terminal]\\n'",
 	} {
 		if !strings.Contains(line, want) {
@@ -335,9 +534,24 @@ func TestCodexReviewShellLineRunsReview(t *testing.T) {
 
 func TestReviewPromptMatchesExpectedStyle(t *testing.T) {
 	mergeBase := "7c2c36bda271075b95513b7009d4df007bbfa497"
-	want := "Review the code changes against the base branch 'main'. The merge base commit for this comparison is 7c2c36bda271075b95513b7009d4df007bbfa497. Run `git diff 7c2c36bda271075b95513b7009d4df007bbfa497` to inspect the changes relative to main. Provide prioritized, actionable findings."
-	if got := reviewPrompt("main", mergeBase); got != want {
-		t.Fatalf("review prompt = %q, want %q", got, want)
+	got := reviewPrompt("parth-launch-codex-app", "origin/main", mergeBase)
+	for _, want := range []string{
+		"# Review Guidelines",
+		"respond in normal Markdown",
+		"Do not return JSON, XML, a findings object, or any structured review schema.",
+		"emit one `::code-comment{...}` directive",
+		"Required `code-comment` attributes: `title`, `body`, and `file`.",
+		"Review the code changes against the base branch 'origin/main'.",
+		"The merge base commit for this comparison is 7c2c36bda271075b95513b7009d4df007bbfa497.",
+		"Run `git diff 7c2c36bda271075b95513b7009d4df007bbfa497`",
+		"Please review changes on parth-launch-codex-app against origin/main.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("review prompt %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "Provide prioritized, actionable findings.") {
+		t.Fatalf("review prompt kept old findings wording: %q", got)
 	}
 }
 

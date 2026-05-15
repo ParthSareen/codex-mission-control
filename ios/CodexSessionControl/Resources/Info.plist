@@ -28,7 +28,9 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connects to the Codex bridge running on your Mac.</string>
+	<string>Connects to the Codex and Zuko services running on your Mac.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Uses Face ID to confirm Zuko command approvals.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

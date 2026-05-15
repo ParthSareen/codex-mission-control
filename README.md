@@ -49,7 +49,7 @@ tab            switch between thread list and fleet/comms pane
 1-9, 0         jump to fleet callsign, with 0 selecting the tenth row
 c              open comms for selected thread
 d              open nvim DiffviewOpen in the selected thread cwd
-n              create a new mission: pick/create cwd, branch/review optional, launch codex
+n              create a new mission in CMC: pick/create cwd, branch/review optional
 /              search chats/folders/worktrees
 enter          open comms for selected thread
 o              fleet overview
@@ -59,8 +59,12 @@ ctrl+u/d       scroll comms history
 l              snap back to live/latest
 v              visual-select comms lines
 y              copy selected/current comms lines
-r              launch codex resume <id> in Ghostty split/window
-R or a         ask, then launch codex resume with that prompt
+r              resume selected thread through CMC
+R or a         ask, then send that prompt through CMC
+A              approve selected pending Codex request
+S              approve selected pending Codex request for the session
+D              deny selected pending Codex request
+p              cycle pending Codex requests
 t              cycle theme
 space          pause/resume live updates
 esc            leave focus or cancel prompt
@@ -81,40 +85,56 @@ Diffview, and Mission Control state persistence. Green is ready, yellow is
 non-blocking degraded mode, and red means a required system failed.
 
 Escalation requests, such as tool calls with
-`sandbox_permissions: "require_escalated"`, render as `ALERT`. Threads with a
-fresh final answer that you have not selected render as red `REVIEW` until
-opened.
-
-Launches prefer Ghostty on macOS. If Mission Control is already running inside
-Ghostty, `r` opens a right split with the selected thread's cwd and `codex
-resume`; otherwise it opens a new Ghostty window. Ghostty launches use a surface
-configuration with the thread cwd and initial shell input so your normal shell
-and Ghostty integration stay in play. Tmux is used as a fallback when Ghostty
-scripting is unavailable inside a tmux session.
+`sandbox_permissions: "require_escalated"`, render as `ALERT`. CMC-initiated
+turns run through a persistent headless `codex app-server`, so pending Codex
+exec and file-change approvals appear in the approvals pane and can be handled
+with `A`, `S`, or `D` without leaving Mission Control. Threads with a fresh
+final answer that you have not selected render as red `REVIEW` until opened.
 
 ## iOS companion
 
 The `ios/CodexSessionControl` project is a small SwiftUI app for selecting an
 existing thread, watching its latest rollout events, and sending a prompt from
-an iPhone or simulator. It talks to the Mac-side bridge:
+an iPhone or simulator. For a physical iPhone with Tailscale, start both the
+Codex bridge and the Zuko approval server in the background with:
 
 ```sh
-go run ./cmd/cmc-bridge
+cmc serve
 ```
 
-Use Tailscale for a physical device:
+`cmc serve` binds both services only to this Mac's Tailscale IPv4 address by
+default and prints the two URLs to enter in the iOS app:
+
+- Codex bridge URL, usually `http://100.x.y.z:8765`
+- Zuko approvals URL, usually `http://100.x.y.z:9777`
+
+For local simulator testing:
 
 ```sh
-go run ./cmd/cmc-bridge --tailscale
+cmc serve --local
 ```
 
-The bridge binds only to the Mac's Tailscale IPv4 address and prints the exact
-URL to enter in the iOS app.
+Check or stop the background services with:
+
+```sh
+cmc serve --status
+cmc serve --stop
+```
+
+`cmc-bridge` still exists as the bridge-only worker for debugging, but the
+normal phone workflow should use `cmc serve`.
 
 On the thread detail screen, the app polls the bridge every 5 seconds for the
 latest messages/events. You can send a prompt or command into the selected
 thread through the bridge's persistent headless `codex app-server`, and
 optionally override model plus reasoning speed for that turn.
+
+Codex exec and file-change approval prompts are routed to the phone by default;
+pending requests can be approved or denied with Face ID/passcode confirmation.
+When you are viewing a thread, matching Codex and Zuko approvals appear inside
+that thread. The shield button still opens the full approvals sheet, where you
+can disable Codex approvals or enter the Zuko URL from `cmc serve` and the
+token from `zuko pair`.
 
 The app can also start a new chat. The bridge exposes a project picker rooted
 at `~/Documents/repos`, validates that the chosen directory stays under that

@@ -1,6 +1,7 @@
 package mission
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -98,7 +99,7 @@ func TestBridgeContinueLaunchesSelectedThread(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Status != "sent prompt to codex app-server" {
+	if response.Status != "launched codex resume" {
 		t.Fatalf("status message = %q", response.Status)
 	}
 	if launchedThread.ID != "thread-one" {
@@ -109,7 +110,7 @@ func TestBridgeContinueLaunchesSelectedThread(t *testing.T) {
 	}
 }
 
-func TestBridgeContinueEmptyPromptResumesHeadless(t *testing.T) {
+func TestBridgeContinueEmptyPromptLaunchesTerminal(t *testing.T) {
 	var launchedOptions bridgeLaunchOptions
 	server := newBridgeServer(fakeThreadLoader{threads: []codex.Thread{{
 		ID:    "thread-one",
@@ -131,7 +132,7 @@ func TestBridgeContinueEmptyPromptResumesHeadless(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Status != "resumed thread in codex app-server" {
+	if response.Status != "launched codex resume" {
 		t.Fatalf("status message = %q", response.Status)
 	}
 	if launchedOptions.Prompt != "" {
@@ -219,7 +220,7 @@ func TestBridgeStartsNewThreadInSelectedProject(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ID != "thread-new" || response.Thread == nil || response.Thread.CWD != wantCWD {
+	if response.Status != "launched codex thread" || response.ID != "thread-new" || response.Thread == nil || response.Thread.CWD != wantCWD {
 		t.Fatalf("response = %#v", response)
 	}
 }
@@ -335,6 +336,97 @@ func TestBridgeCreatesProjectWorktree(t *testing.T) {
 	}
 	if response.Worktree.Path != worktreePath || response.Context.CurrentBranch != "feature" {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestBridgeApprovalSettings(t *testing.T) {
+	server := newBridgeServer(fakeThreadLoader{}, 80, nil)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/approvals/settings", nil)
+	server.handler("/tmp/codex").ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var settings bridgeApprovalSettingsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if !settings.Enabled {
+		t.Fatalf("settings = %#v, want enabled by default", settings)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/approvals/settings", strings.NewReader(`{"enabled":false}`))
+	server.handler("/tmp/codex").ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if server.approvals.Enabled() {
+		t.Fatal("approval broker is still enabled")
+	}
+}
+
+func TestBridgeApprovalDecision(t *testing.T) {
+	server := newBridgeServer(fakeThreadLoader{}, 80, nil)
+	server.approvals.SetEnabled(true)
+	result := make(chan codexApprovalDecision, 1)
+
+	go func() {
+		result <- server.approvals.Request(context.Background(), "item/commandExecution/requestApproval", json.RawMessage(`{
+			"threadId":"thread-one",
+			"turnId":"turn-one",
+			"itemId":"item-one",
+			"command":"git commit --allow-empty -m test",
+			"cwd":"/tmp/work"
+		}`))
+	}()
+
+	var approval codexApproval
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		approvals := server.approvals.List()
+		if len(approvals) == 1 {
+			approval = approvals[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if approval.ID == "" {
+		t.Fatal("approval was not queued")
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/approvals", nil)
+	server.handler("/tmp/codex").ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response bridgeApprovalsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Enabled || len(response.Approvals) != 1 || response.Approvals[0].ID != approval.ID {
+		t.Fatalf("response = %#v", response)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/approvals/"+url.PathEscape(approval.ID)+"/decision", strings.NewReader(`{"decision":"approve"}`))
+	server.handler("/tmp/codex").ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	select {
+	case decision := <-result:
+		if decision != codexApprovalApprove {
+			t.Fatalf("decision = %q, want approve", decision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for decision")
 	}
 }
 
@@ -456,6 +548,24 @@ func TestCodexResumeShellLineWithModelAndReasoning(t *testing.T) {
 	for _, want := range []string{
 		"cd '/tmp/work tree'",
 		"codex resume -m 'gpt-5.3-codex' -c 'model_reasoning_effort=\"high\"' 'thread-one' 'run tests'",
+		"printf '\\n[codex exited - press enter or close this terminal]\\n'",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("line %q does not contain %q", line, want)
+		}
+	}
+}
+
+func TestCodexNewMissionShellLineWithModelAndReasoning(t *testing.T) {
+	line := codexNewMissionShellLineWithOptions("/tmp/work tree", bridgeLaunchOptions{
+		Prompt:          "start here",
+		Model:           "gpt-5.3-codex",
+		ReasoningEffort: "medium",
+	})
+
+	for _, want := range []string{
+		"cd '/tmp/work tree'",
+		"codex -m 'gpt-5.3-codex' -c 'model_reasoning_effort=\"medium\"' 'start here'",
 		"printf '\\n[codex exited - press enter or close this terminal]\\n'",
 	} {
 		if !strings.Contains(line, want) {

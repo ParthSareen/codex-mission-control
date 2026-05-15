@@ -1,5 +1,270 @@
 import Foundation
+import LocalAuthentication
+import Security
 import SwiftUI
+
+private struct ZukoKeychainError: LocalizedError {
+    let status: OSStatus
+
+    var errorDescription: String? {
+        "Keychain error \(status)"
+    }
+}
+
+private enum ZukoTokenVault {
+    private static let service = "CodexSessionControl.Zuko"
+    private static let account = "approvalToken"
+
+    static func load() -> String {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else {
+            return ""
+        }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    static func save(_ token: String) throws {
+        try delete()
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else {
+            return
+        }
+
+        var query = baseQuery()
+        query[kSecValueData as String] = data
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw ZukoKeychainError(status: status)
+        }
+    }
+
+    static func delete() throws {
+        let status = SecItemDelete(baseQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ZukoKeychainError(status: status)
+        }
+    }
+
+    private static func baseQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+    }
+}
+
+private enum ApprovalLocalAuth {
+    static func authenticate(reason: String) async throws {
+        let context = LAContext()
+        var error: NSError?
+        let policy: LAPolicy = .deviceOwnerAuthentication
+        guard context.canEvaluatePolicy(policy, error: &error) else {
+            throw error ?? LAError(.biometryNotAvailable)
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            context.evaluatePolicy(policy, localizedReason: reason) { success, error in
+                if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: error ?? LAError(.authenticationFailed))
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+final class ZukoApprovalStore: ObservableObject {
+    private static let zukoURLKey = "zukoServerURL"
+
+    @Published var serverURLString: String {
+        didSet {
+            UserDefaults.standard.set(serverURLString, forKey: Self.zukoURLKey)
+        }
+    }
+    @Published var token: String
+    @Published var approvals: [ZukoApproval] = []
+    @Published var isLoading = false
+    @Published var decidingApprovalID: String?
+    @Published var errorMessage: String?
+    @Published var statusMessage: String?
+    @Published var lastRefresh: Date?
+    private var isPolling = false
+
+    init() {
+        serverURLString = UserDefaults.standard.string(forKey: Self.zukoURLKey) ?? ""
+        token = ZukoTokenVault.load()
+    }
+
+    var isConfigured: Bool {
+        !serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func saveToken(_ value: String) {
+        do {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            try ZukoTokenVault.save(trimmed)
+            token = trimmed
+            statusMessage = "Zuko token saved"
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func poll(showSpinner: Bool = true) async {
+        guard isConfigured else {
+            approvals = []
+            errorMessage = "Enter the zuko server URL and pair token."
+            return
+        }
+        guard !isPolling else {
+            return
+        }
+
+        isPolling = true
+        if showSpinner {
+            isLoading = true
+        }
+        defer {
+            isPolling = false
+            if showSpinner {
+                isLoading = false
+            }
+        }
+
+        do {
+            let api = try ZukoAPI(baseURLString: serverURLString, token: token)
+            approvals = try await api.approvals()
+            lastRefresh = Date()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func decide(_ approval: ZukoApproval, decision: String) async {
+        guard decidingApprovalID == nil else {
+            return
+        }
+
+        decidingApprovalID = approval.id
+        errorMessage = nil
+        statusMessage = nil
+        defer { decidingApprovalID = nil }
+
+        do {
+            try await ApprovalLocalAuth.authenticate(reason: "Zuko: \(decision) \(approval.command)")
+            let api = try ZukoAPI(baseURLString: serverURLString, token: token)
+            _ = try await api.decide(approvalID: approval.id, decision: decision)
+            approvals.removeAll { $0.id == approval.id }
+            statusMessage = decision == "approve" ? "Approved \(approval.tool)" : "Denied \(approval.tool)"
+            await poll(showSpinner: false)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+@MainActor
+final class CodexApprovalStore: ObservableObject {
+    @Published var enabled = true
+    @Published var approvals: [CodexApproval] = []
+    @Published var isLoading = false
+    @Published var isSaving = false
+    @Published var decidingApprovalID: String?
+    @Published var errorMessage: String?
+    @Published var statusMessage: String?
+    @Published var lastRefresh: Date?
+    private var isPolling = false
+
+    func poll(bridgeURLString: String, showSpinner: Bool = true) async {
+        guard !isPolling, !isSaving else {
+            return
+        }
+
+        isPolling = true
+        if showSpinner {
+            isLoading = true
+        }
+        defer {
+            isPolling = false
+            if showSpinner {
+                isLoading = false
+            }
+        }
+
+        do {
+            let api = try CodexAPI(baseURLString: bridgeURLString)
+            let response = try await api.codexApprovals()
+            enabled = response.isEnabled
+            approvals = response.isEnabled ? response.approvals : []
+            lastRefresh = Date()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setEnabled(bridgeURLString: String, enabled nextEnabled: Bool) async {
+        guard !isSaving else {
+            return
+        }
+
+        let previousEnabled = enabled
+        enabled = nextEnabled
+        if !nextEnabled {
+            approvals = []
+        }
+        isSaving = true
+        errorMessage = nil
+        statusMessage = nil
+        defer { isSaving = false }
+
+        do {
+            let api = try CodexAPI(baseURLString: bridgeURLString)
+            let response = try await api.updateCodexApprovalSettings(enabled: nextEnabled)
+            enabled = response.isEnabled
+            if !response.isEnabled {
+                approvals = []
+            }
+            statusMessage = response.isEnabled ? "Codex approvals enabled" : "Codex approvals disabled"
+        } catch {
+            enabled = previousEnabled
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func decide(_ approval: CodexApproval, decision: String, bridgeURLString: String) async {
+        guard decidingApprovalID == nil else {
+            return
+        }
+
+        decidingApprovalID = approval.id
+        errorMessage = nil
+        statusMessage = nil
+        defer { decidingApprovalID = nil }
+
+        do {
+            try await ApprovalLocalAuth.authenticate(reason: "Codex: \(decision) \(approval.command ?? approval.kind)")
+            let api = try CodexAPI(baseURLString: bridgeURLString)
+            _ = try await api.decideCodexApproval(id: approval.id, decision: decision)
+            approvals.removeAll { $0.id == approval.id }
+            statusMessage = decision == "approve" ? "Approved Codex request" : "Denied Codex request"
+            await poll(bridgeURLString: bridgeURLString, showSpinner: false)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
 
 @MainActor
 final class ThreadStore: ObservableObject {
@@ -172,7 +437,11 @@ final class ThreadStore: ObservableObject {
             if let thread = response.thread {
                 upsertThread(thread)
             }
-            createdThreadID = response.id
+            if let id = response.id.nilIfEmpty {
+                createdThreadID = id
+            } else {
+                launchMessage = response.status
+            }
             return true
         } catch {
             launchMessage = error.localizedDescription
@@ -223,9 +492,12 @@ private let reasoningChoices: [ModelChoice] = [
 
 struct ContentView: View {
     @StateObject private var store = ThreadStore()
+    @StateObject private var zukoStore = ZukoApprovalStore()
+    @StateObject private var codexApprovalStore = CodexApprovalStore()
     @State private var navigationPath = NavigationPath()
     @State private var searchText = ""
     @State private var showingSettings = false
+    @State private var showingZuko = false
     @State private var showingNewChat = false
 
     private var filteredThreads: [CodexThread] {
@@ -239,6 +511,10 @@ struct ContentView: View {
                 || thread.id.localizedCaseInsensitiveContains(query)
                 || (thread.lastSignal?.localizedCaseInsensitiveContains(query) ?? false)
         }
+    }
+
+    private var hasPendingApprovals: Bool {
+        !zukoStore.approvals.isEmpty || !codexApprovalStore.approvals.isEmpty
     }
 
     var body: some View {
@@ -269,11 +545,16 @@ struct ContentView: View {
             .navigationTitle("Codex")
             .searchable(text: $searchText, prompt: "Search")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItemGroup(placement: .topBarLeading) {
                     Button {
                         showingSettings = true
                     } label: {
                         Label("Settings", systemImage: "gearshape")
+                    }
+                    Button {
+                        showingZuko = true
+                    } label: {
+                        Label("Approvals", systemImage: hasPendingApprovals ? "lock.shield.fill" : "lock.shield")
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -291,10 +572,22 @@ struct ContentView: View {
                 }
             }
             .navigationDestination(for: String.self) { threadID in
-                ThreadDetailView(store: store, threadID: threadID)
+                ThreadDetailView(
+                    store: store,
+                    zukoStore: zukoStore,
+                    codexStore: codexApprovalStore,
+                    threadID: threadID
+                )
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView(store: store)
+            }
+            .sheet(isPresented: $showingZuko) {
+                ZukoApprovalsView(
+                    store: zukoStore,
+                    codexStore: codexApprovalStore,
+                    bridgeURLString: store.bridgeURLString
+                )
             }
             .sheet(isPresented: $showingNewChat) {
                 NewChatView(store: store)
@@ -383,6 +676,8 @@ struct ThreadRow: View {
 
 struct ThreadDetailView: View {
     @ObservedObject var store: ThreadStore
+    @ObservedObject var zukoStore: ZukoApprovalStore
+    @ObservedObject var codexStore: CodexApprovalStore
     let threadID: String
     @State private var prompt = ""
 
@@ -396,6 +691,41 @@ struct ThreadDetailView: View {
 
     private var newestEvents: [CodexEvent] {
         Array(events.suffix(40).reversed())
+    }
+
+    private var threadCodexApprovals: [CodexApproval] {
+        guard let thread else {
+            return []
+        }
+        return codexStore.approvals.filter { approval in
+            approval.threadID == thread.id || approval.cwd?.isSameOrInside(thread.cwd) == true
+        }
+    }
+
+    private var threadZukoApprovals: [ZukoApproval] {
+        guard let thread else {
+            return []
+        }
+        return zukoStore.approvals.filter { approval in
+            approval.cwd?.isSameOrInside(thread.cwd) == true
+        }
+    }
+
+    private var hasThreadApprovals: Bool {
+        !threadCodexApprovals.isEmpty || !threadZukoApprovals.isEmpty
+    }
+
+    private var localCodexEscalation: String? {
+        guard threadCodexApprovals.isEmpty,
+              thread?.lastSignalKind == "escalation",
+              let signal = thread?.lastSignal?.nilIfEmpty else {
+            return nil
+        }
+        return signal
+    }
+
+    private var showsApprovalSection: Bool {
+        hasThreadApprovals || localCodexEscalation != nil
     }
 
     var body: some View {
@@ -428,6 +758,19 @@ struct ThreadDetailView: View {
                             prompt: $prompt,
                             isSending: store.continuingThreadID == thread.id
                         )
+
+                        if showsApprovalSection {
+                            DetailSection(title: "Approvals") {
+                                ThreadApprovalsView(
+                                    zukoStore: zukoStore,
+                                    codexStore: codexStore,
+                                    bridgeURLString: store.bridgeURLString,
+                                    zukoApprovals: threadZukoApprovals,
+                                    codexApprovals: threadCodexApprovals,
+                                    localCodexEscalation: localCodexEscalation
+                                )
+                            }
+                        }
 
                         DetailSection(title: "Latest") {
                             if let signal = thread.lastSignal, !signal.isEmpty {
@@ -491,6 +834,98 @@ struct ThreadDetailView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
                 await store.refreshDetail(threadID: threadID)
+            }
+        }
+        .task(id: store.bridgeURLString) {
+            await codexStore.poll(bridgeURLString: store.bridgeURLString, showSpinner: false)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                await codexStore.poll(bridgeURLString: store.bridgeURLString, showSpinner: false)
+            }
+        }
+        .task(id: zukoStore.serverURLString + "|" + zukoStore.token) {
+            guard zukoStore.isConfigured else {
+                return
+            }
+            await zukoStore.poll(showSpinner: false)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                await zukoStore.poll(showSpinner: false)
+            }
+        }
+    }
+}
+
+private extension String {
+    func isSameOrInside(_ root: String) -> Bool {
+        let path = trimmingCharacters(in: .whitespacesAndNewlines)
+        let root = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty, !root.isEmpty else {
+            return false
+        }
+        if path == root || path.hasPrefix(root + "/") {
+            return true
+        }
+        if !path.hasPrefix("/") {
+            return root == path || root.hasSuffix("/" + path)
+        }
+        if !root.hasPrefix("/") {
+            return path == root || path.hasSuffix("/" + root)
+        }
+        return false
+    }
+}
+
+struct ThreadApprovalsView: View {
+    @ObservedObject var zukoStore: ZukoApprovalStore
+    @ObservedObject var codexStore: CodexApprovalStore
+    let bridgeURLString: String
+    let zukoApprovals: [ZukoApproval]
+    let codexApprovals: [CodexApproval]
+    let localCodexEscalation: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let localCodexEscalation {
+                LocalCodexEscalationRow(signal: localCodexEscalation)
+            }
+
+            ForEach(codexApprovals) { approval in
+                CodexApprovalRow(
+                    approval: approval,
+                    isDeciding: codexStore.decidingApprovalID == approval.id,
+                    approve: {
+                        Task {
+                            await codexStore.decide(
+                                approval,
+                                decision: "approve",
+                                bridgeURLString: bridgeURLString
+                            )
+                        }
+                    },
+                    deny: {
+                        Task {
+                            await codexStore.decide(
+                                approval,
+                                decision: "deny",
+                                bridgeURLString: bridgeURLString
+                            )
+                        }
+                    }
+                )
+            }
+
+            ForEach(zukoApprovals) { approval in
+                ZukoApprovalRow(
+                    approval: approval,
+                    isDeciding: zukoStore.decidingApprovalID == approval.id,
+                    approve: {
+                        Task { await zukoStore.decide(approval, decision: "approve") }
+                    },
+                    deny: {
+                        Task { await zukoStore.decide(approval, decision: "deny") }
+                    }
+                )
             }
         }
     }
@@ -758,6 +1193,8 @@ struct MarkdownMessageView: View {
                 switch block {
                 case .text(let text):
                     MarkdownTextBlock(text: text)
+                case .code(let codeBlock):
+                    MarkdownCodeBlockView(codeBlock: codeBlock)
                 case .table(let table):
                     MarkdownTableView(table: table)
                 }
@@ -770,6 +1207,7 @@ struct MarkdownMessageView: View {
 
 enum MarkdownBlock {
     case text(String)
+    case code(MarkdownCodeBlock)
     case table(MarkdownTable)
 
     static func parse(_ text: String) -> [MarkdownBlock] {
@@ -787,7 +1225,11 @@ enum MarkdownBlock {
         }
 
         while index < lines.count {
-            if let parsed = MarkdownTable.parse(lines: lines, startIndex: index) {
+            if let parsed = MarkdownCodeBlock.parse(lines: lines, startIndex: index) {
+                flushText()
+                blocks.append(.code(parsed.codeBlock))
+                index = parsed.nextIndex
+            } else if let parsed = MarkdownTable.parse(lines: lines, startIndex: index) {
                 flushText()
                 blocks.append(.table(parsed.table))
                 index = parsed.nextIndex
@@ -798,6 +1240,72 @@ enum MarkdownBlock {
         }
         flushText()
         return blocks
+    }
+}
+
+struct MarkdownCodeBlock {
+    let language: String
+    let code: String
+
+    static func parse(lines: [String], startIndex: Int) -> (codeBlock: MarkdownCodeBlock, nextIndex: Int)? {
+        guard startIndex < lines.count, let fence = MarkdownFence(line: lines[startIndex]) else {
+            return nil
+        }
+
+        var codeLines: [String] = []
+        var cursor = startIndex + 1
+        while cursor < lines.count {
+            if MarkdownFence(line: lines[cursor], closingFor: fence) != nil {
+                return (
+                    MarkdownCodeBlock(language: fence.language, code: codeLines.joined(separator: "\n")),
+                    cursor + 1
+                )
+            }
+            codeLines.append(lines[cursor])
+            cursor += 1
+        }
+
+        return (
+            MarkdownCodeBlock(language: fence.language, code: codeLines.joined(separator: "\n")),
+            cursor
+        )
+    }
+}
+
+struct MarkdownFence {
+    let marker: Character
+    let count: Int
+    let language: String
+
+    init?(line: String, closingFor opening: MarkdownFence? = nil) {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let first = trimmed.first, first == "`" || first == "~" else {
+            return nil
+        }
+
+        var markerCount = 0
+        for character in trimmed {
+            if character == first {
+                markerCount += 1
+            } else {
+                break
+            }
+        }
+        guard markerCount >= 3 else {
+            return nil
+        }
+
+        if let opening {
+            guard first == opening.marker, markerCount >= opening.count else {
+                return nil
+            }
+        }
+
+        marker = first
+        count = markerCount
+        let languageStart = trimmed.index(trimmed.startIndex, offsetBy: markerCount)
+        language = String(trimmed[languageStart...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -909,6 +1417,40 @@ struct MarkdownInlineText: View {
             Text(attributed)
         } else {
             Text(text)
+        }
+    }
+}
+
+struct MarkdownCodeBlockView: View {
+    let codeBlock: MarkdownCodeBlock
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 0) {
+                if !codeBlock.language.isEmpty {
+                    Text(codeBlock.language)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                        .padding(.bottom, 4)
+                }
+
+                Text(codeBlock.code.isEmpty ? " " : codeBlock.code)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 12)
+                    .padding(.top, codeBlock.language.isEmpty ? 12 : 4)
+                    .padding(.bottom, 12)
+            }
+            .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.secondary.opacity(0.16), lineWidth: 1)
+            }
         }
     }
 }
@@ -1274,6 +1816,7 @@ struct NewChatView: View {
                         Task {
                             if await store.startNewChat(cwd: cwd, prompt: text) {
                                 prompt = ""
+                                dismiss()
                             }
                         }
                     }
@@ -1395,6 +1938,439 @@ struct CheckoutChoiceRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+struct ZukoApprovalsView: View {
+    @ObservedObject var store: ZukoApprovalStore
+    @ObservedObject var codexStore: CodexApprovalStore
+    @Environment(\.dismiss) private var dismiss
+    let bridgeURLString: String
+    @State private var draftURL: String
+    @State private var draftToken: String
+
+    init(store: ZukoApprovalStore, codexStore: CodexApprovalStore, bridgeURLString: String) {
+        self.store = store
+        self.codexStore = codexStore
+        self.bridgeURLString = bridgeURLString
+        _draftURL = State(initialValue: store.serverURLString)
+        _draftToken = State(initialValue: store.token)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Zuko Connection") {
+                    TextField("Server URL", text: $draftURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    SecureField("Pair token", text: $draftToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Button {
+                        saveConnection()
+                        Task { await store.poll() }
+                    } label: {
+                        Label("Save Connection", systemImage: "key")
+                    }
+                }
+
+                Section("Codex Exec Approvals") {
+                    Toggle(isOn: codexApprovalToggle) {
+                        Label("Approve in app", systemImage: codexStore.enabled ? "checkmark.shield" : "shield")
+                    }
+                    .disabled(codexStore.isSaving)
+
+                    if codexStore.isSaving {
+                        ProgressView()
+                    }
+                }
+
+                Section("Codex Requests") {
+                    if codexStore.isLoading && codexStore.approvals.isEmpty {
+                        ProgressView()
+                    } else if !codexStore.enabled {
+                        Label("Codex approvals off", systemImage: "power")
+                            .foregroundStyle(.secondary)
+                    } else if codexStore.approvals.isEmpty {
+                        Label("No pending Codex requests", systemImage: "checkmark.shield")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(codexStore.approvals) { approval in
+                            CodexApprovalRow(
+                                approval: approval,
+                                isDeciding: codexStore.decidingApprovalID == approval.id,
+                                approve: {
+                                    Task {
+                                        await codexStore.decide(
+                                            approval,
+                                            decision: "approve",
+                                            bridgeURLString: bridgeURLString
+                                        )
+                                    }
+                                },
+                                deny: {
+                                    Task {
+                                        await codexStore.decide(
+                                            approval,
+                                            decision: "deny",
+                                            bridgeURLString: bridgeURLString
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Section("Zuko Requests") {
+                    if store.isLoading && store.approvals.isEmpty {
+                        ProgressView()
+                    } else if !store.isConfigured {
+                        Label("Enter the zuko server URL and pair token", systemImage: "lock.shield")
+                            .foregroundStyle(.secondary)
+                    } else if store.approvals.isEmpty {
+                        Label("No pending approvals", systemImage: "checkmark.shield")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.approvals) { approval in
+                            ZukoApprovalRow(
+                                approval: approval,
+                                isDeciding: store.decidingApprovalID == approval.id,
+                                approve: {
+                                    Task { await store.decide(approval, decision: "approve") }
+                                },
+                                deny: {
+                                    Task { await store.decide(approval, decision: "deny") }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                if store.lastRefresh != nil || codexStore.lastRefresh != nil {
+                    Section("Status") {
+                        if let refreshed = codexStore.lastRefresh {
+                            DetailRow(label: "Codex", value: shortRelativeTime(refreshed))
+                        }
+                        if let refreshed = store.lastRefresh {
+                            DetailRow(label: "Zuko", value: shortRelativeTime(refreshed))
+                        }
+                    }
+                }
+
+                if let status = codexStore.statusMessage {
+                    Section {
+                        Text(status)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let status = store.statusMessage {
+                    Section {
+                        Text(status)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let error = codexStore.errorMessage {
+                    Section {
+                        Text(error)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                if let error = store.errorMessage {
+                    Section {
+                        Text(error)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Approvals")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        Task { await refreshNow() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+            .task(id: store.serverURLString + "|" + store.token) {
+                guard store.isConfigured else {
+                    return
+                }
+                await store.poll()
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(5))
+                    await store.poll(showSpinner: false)
+                }
+            }
+            .task(id: bridgeURLString) {
+                await codexStore.poll(bridgeURLString: bridgeURLString)
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(5))
+                    await codexStore.poll(bridgeURLString: bridgeURLString, showSpinner: false)
+                }
+            }
+        }
+    }
+
+    private var codexApprovalToggle: Binding<Bool> {
+        Binding(
+            get: { codexStore.enabled },
+            set: { enabled in
+                Task {
+                    await codexStore.setEnabled(bridgeURLString: bridgeURLString, enabled: enabled)
+                }
+            }
+        )
+    }
+
+    private func saveConnection() {
+        store.serverURLString = draftURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        store.saveToken(draftToken)
+    }
+
+    private func refreshNow() async {
+        saveConnection()
+        await store.poll()
+        await codexStore.poll(bridgeURLString: bridgeURLString)
+    }
+}
+
+private struct LocalCodexEscalationPayload: Decodable {
+    let cmd: String?
+    let command: String?
+    let cwd: String?
+    let workdir: String?
+    let justification: String?
+    let sandboxPermissions: String?
+
+    enum CodingKeys: String, CodingKey {
+        case cmd
+        case command
+        case cwd
+        case workdir
+        case justification
+        case sandboxPermissions = "sandbox_permissions"
+    }
+}
+
+struct LocalCodexEscalationRow: View {
+    let signal: String
+
+    private var payload: LocalCodexEscalationPayload? {
+        guard let jsonStart = signal.firstIndex(of: "{") else {
+            return nil
+        }
+        let jsonText = String(signal[jsonStart...])
+        guard let data = jsonText.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(LocalCodexEscalationPayload.self, from: data)
+    }
+
+    private var commandText: String {
+        payload?.cmd?.nilIfEmpty
+            ?? payload?.command?.nilIfEmpty
+            ?? signal.replacingOccurrences(of: "ESCALATION REQUESTED ", with: "").nilIfEmpty
+            ?? "Codex approval request"
+    }
+
+    private var cwd: String? {
+        payload?.cwd?.nilIfEmpty ?? payload?.workdir?.nilIfEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Local Codex")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Label("Mac", systemImage: "desktopcomputer")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Text(commandText)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(4)
+
+            if let reason = payload?.justification?.nilIfEmpty {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+
+            if let cwd {
+                Text(cwd)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Text("Approve this one on the Mac. Future turns started from this app route Codex approvals here.")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+struct CodexApprovalRow: View {
+    let approval: CodexApproval
+    let isDeciding: Bool
+    let approve: () -> Void
+    let deny: () -> Void
+
+    private var title: String {
+        switch approval.kind {
+        case "file_change":
+            return "File Change"
+        case "command":
+            return "Command"
+        default:
+            return "Codex"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if let expiresAt = approval.expiresAt, let expires = DateParser.parse(expiresAt) {
+                    Text("Expires \(shortRelativeTime(expires))")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(approval.command?.nilIfEmpty ?? "Codex approval request")
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(4)
+
+            if let reason = approval.reason?.nilIfEmpty {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+
+            if let cwd = approval.cwd?.nilIfEmpty {
+                Text(cwd)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            if let fileChanges = approval.fileChanges, !fileChanges.isEmpty {
+                Text(fileChanges.prefix(3).joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            HStack {
+                Button(role: .destructive) {
+                    deny()
+                } label: {
+                    Label("Deny", systemImage: "xmark")
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                Button {
+                    approve()
+                } label: {
+                    Label("Approve", systemImage: "checkmark")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .disabled(isDeciding)
+
+            if isDeciding {
+                ProgressView()
+            }
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+struct ZukoApprovalRow: View {
+    let approval: ZukoApproval
+    let isDeciding: Bool
+    let approve: () -> Void
+    let deny: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(approval.scope)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if let expiresAt = approval.expiresAt, let expires = DateParser.parse(expiresAt) {
+                    Text("Expires \(shortRelativeTime(expires))")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(approval.command)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(4)
+
+            if let cwd = approval.cwd, !cwd.isEmpty {
+                Text(cwd)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            HStack {
+                Button(role: .destructive) {
+                    deny()
+                } label: {
+                    Label("Deny", systemImage: "xmark")
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                Button {
+                    approve()
+                } label: {
+                    Label("Approve", systemImage: "checkmark")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .disabled(isDeciding)
+
+            if isDeciding {
+                ProgressView()
+            }
+        }
+        .padding(.vertical, 6)
     }
 }
 

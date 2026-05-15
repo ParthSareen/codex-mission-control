@@ -37,6 +37,7 @@ type bridgeServer struct {
 	loadGitContext func(string, string) (bridgeProjectGitResponse, error)
 	createWorktree func(string, bridgeCreateWorktreeRequest) (bridgeCreateWorktreeResponse, error)
 	projectRoot    string
+	approvals      *codexApprovalBroker
 }
 
 type bridgeThread struct {
@@ -116,6 +117,28 @@ type bridgeErrorResponse struct {
 	Error string `json:"error"`
 }
 
+type bridgeApprovalsResponse struct {
+	Enabled                   bool            `json:"enabled"`
+	CodexExecApprovalsEnabled bool            `json:"codex_exec_approvals_enabled"`
+	Approvals                 []codexApproval `json:"approvals"`
+}
+
+type bridgeApprovalSettingsResponse struct {
+	Enabled                   bool `json:"enabled"`
+	CodexExecApprovalsEnabled bool `json:"codex_exec_approvals_enabled"`
+}
+
+type bridgeApprovalDecisionRequest struct {
+	Decision string `json:"decision"`
+}
+
+type bridgeApprovalDecisionResponse struct {
+	Status   string         `json:"status"`
+	ID       string         `json:"id"`
+	Decision string         `json:"decision"`
+	Approval *codexApproval `json:"approval,omitempty"`
+}
+
 func RunBridge(args []string, stdout, stderr io.Writer) int {
 	home, _ := os.UserHomeDir()
 	defaultCodexHome := filepath.Join(home, ".codex")
@@ -150,10 +173,11 @@ func RunBridge(args []string, stdout, stderr io.Writer) int {
 	}
 
 	store := codex.NewStore(codexHome)
-	controller := newCodexThreadController()
-	bridge := newBridgeServer(store, limit, controller.Continue)
-	bridge.startThread = controller.StartNewChat
+	approvals := newCodexApprovalBroker(true)
+	bridge := newBridgeServer(store, limit, launchCodexResumeTerminal)
+	bridge.startThread = launchCodexNewTerminal
 	bridge.projectRoot = projectRoot
+	bridge.approvals = approvals
 	fmt.Fprintf(stdout, "Codex bridge listening on http://%s\n", addr)
 	if err := http.ListenAndServe(addr, bridge.handler(codexHome)); err != nil {
 		fmt.Fprintf(stderr, "codex bridge: %v\n", err)
@@ -166,26 +190,29 @@ func newBridgeServer(store bridgeStore, limit int, launch func(codex.Thread, bri
 	if limit <= 0 {
 		limit = 80
 	}
+	approvals := newCodexApprovalBroker(true)
 	if launch == nil {
-		controller := newCodexThreadController()
-		launch = controller.Continue
+		launch = launchCodexResumeTerminal
 		return bridgeServer{
 			store:          store,
 			limit:          limit,
 			launch:         launch,
-			startThread:    controller.StartNewChat,
+			startThread:    launchCodexNewTerminal,
 			loadGitContext: loadProjectGitContext,
 			createWorktree: createProjectWorktree,
 			projectRoot:    defaultProjectsRoot(),
+			approvals:      approvals,
 		}
 	}
 	return bridgeServer{
 		store:          store,
 		limit:          limit,
 		launch:         launch,
+		startThread:    launchCodexNewTerminal,
 		loadGitContext: loadProjectGitContext,
 		createWorktree: createProjectWorktree,
 		projectRoot:    defaultProjectsRoot(),
+		approvals:      approvals,
 	}
 }
 
@@ -202,6 +229,9 @@ func (s bridgeServer) handler(codexHome string) http.Handler {
 			Limit:     s.limit,
 		})
 	})
+	mux.HandleFunc("/api/approvals/settings", s.serveApprovalSettings)
+	mux.HandleFunc("/api/approvals", s.serveApprovals)
+	mux.HandleFunc("/api/approvals/", s.serveApprovalAction)
 	mux.HandleFunc("/api/threads", s.serveThreads)
 	mux.HandleFunc("/api/threads/", s.serveThreadAction)
 	mux.HandleFunc("/api/projects", s.serveProjects)
@@ -327,19 +357,167 @@ func (s bridgeServer) serveNewThread(w http.ResponseWriter, r *http.Request) {
 		Model:           request.Model,
 		ReasoningEffort: request.ReasoningEffort,
 	}
+	beforeIDs := s.loadedThreadIDs()
 	thread, err := s.startThread(projectPath, options)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, bridgeErrorResponse{Error: err.Error()})
 		return
 	}
-	responseThread := threadForBridge(thread)
-	if responseThread.Title == "" || responseThread.Title == "(untitled)" {
-		responseThread.Title = filepath.Base(projectPath)
+	if strings.TrimSpace(thread.ID) == "" {
+		if detected, ok := s.waitForNewThread(projectPath, beforeIDs, 5*time.Second); ok {
+			thread = detected
+		}
+	}
+	var responseThread *bridgeThread
+	if strings.TrimSpace(thread.ID) != "" {
+		threadForResponse := threadForBridge(thread)
+		if threadForResponse.Title == "" || threadForResponse.Title == "(untitled)" {
+			threadForResponse.Title = filepath.Base(projectPath)
+		}
+		responseThread = &threadForResponse
 	}
 	writeJSON(w, http.StatusOK, bridgeContinueResponse{
-		Status: "started codex thread",
+		Status: "launched codex thread",
 		ID:     thread.ID,
-		Thread: &responseThread,
+		Thread: responseThread,
+	})
+}
+
+func (s bridgeServer) loadedThreadIDs() map[string]bool {
+	threads, err := s.store.LoadThreads(max(s.limit, 200))
+	if err != nil {
+		return nil
+	}
+	ids := make(map[string]bool, len(threads))
+	for _, thread := range threads {
+		if strings.TrimSpace(thread.ID) != "" {
+			ids[thread.ID] = true
+		}
+	}
+	return ids
+}
+
+func (s bridgeServer) waitForNewThread(cwd string, before map[string]bool, timeout time.Duration) (codex.Thread, bool) {
+	cwd = normalizeDir(cwd)
+	deadline := time.Now().Add(timeout)
+	for {
+		threads, err := s.store.LoadThreads(max(s.limit, 200))
+		if err == nil {
+			for _, thread := range threads {
+				if strings.TrimSpace(thread.ID) == "" || before[thread.ID] {
+					continue
+				}
+				if normalizeDir(thread.CWD) == cwd {
+					return thread, true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return codex.Thread{}, false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func (s bridgeServer) serveApprovalSettings(w http.ResponseWriter, r *http.Request) {
+	if s.approvals == nil {
+		writeJSON(w, http.StatusInternalServerError, bridgeErrorResponse{Error: "approval broker is not configured"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, bridgeApprovalSettingsResponse{
+			Enabled:                   s.approvals.Enabled(),
+			CodexExecApprovalsEnabled: s.approvals.Enabled(),
+		})
+	case http.MethodPost:
+		var request map[string]bool
+		if r.Body != nil {
+			defer r.Body.Close()
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil && err != io.EOF {
+				writeJSON(w, http.StatusBadRequest, bridgeErrorResponse{Error: "invalid json body"})
+				return
+			}
+		}
+		enabled, ok := request["enabled"]
+		if !ok {
+			enabled, ok = request["codex_exec_approvals_enabled"]
+		}
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, bridgeErrorResponse{Error: "missing enabled setting"})
+			return
+		}
+		s.approvals.SetEnabled(enabled)
+		writeJSON(w, http.StatusOK, bridgeApprovalSettingsResponse{
+			Enabled:                   s.approvals.Enabled(),
+			CodexExecApprovalsEnabled: s.approvals.Enabled(),
+		})
+	default:
+		writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s bridgeServer) serveApprovals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if s.approvals == nil {
+		writeJSON(w, http.StatusInternalServerError, bridgeErrorResponse{Error: "approval broker is not configured"})
+		return
+	}
+	enabled := s.approvals.Enabled()
+	writeJSON(w, http.StatusOK, bridgeApprovalsResponse{
+		Enabled:                   enabled,
+		CodexExecApprovalsEnabled: enabled,
+		Approvals:                 s.approvals.List(),
+	})
+}
+
+func (s bridgeServer) serveApprovalAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if s.approvals == nil {
+		writeJSON(w, http.StatusInternalServerError, bridgeErrorResponse{Error: "approval broker is not configured"})
+		return
+	}
+	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/approvals/"), "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 2 || parts[1] != "decision" {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(id) == "" {
+		writeJSON(w, http.StatusBadRequest, bridgeErrorResponse{Error: "invalid approval id"})
+		return
+	}
+
+	var request bridgeApprovalDecisionRequest
+	if r.Body != nil {
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil && err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, bridgeErrorResponse{Error: "invalid json body"})
+			return
+		}
+	}
+	approval, ok, err := s.approvals.Decide(id, request.Decision)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, bridgeErrorResponse{Error: err.Error()})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, bridgeErrorResponse{Error: "approval not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, bridgeApprovalDecisionResponse{
+		Status:   "decided",
+		ID:       id,
+		Decision: strings.TrimSpace(request.Decision),
+		Approval: &approval,
 	})
 }
 
@@ -428,11 +606,7 @@ func (s bridgeServer) serveThreadContinue(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, bridgeErrorResponse{Error: err.Error()})
 		return
 	}
-	status := "sent prompt to codex app-server"
-	if strings.TrimSpace(options.Prompt) == "" {
-		status = "resumed thread in codex app-server"
-	}
-	writeJSON(w, http.StatusOK, bridgeContinueResponse{Status: status, ID: thread.ID})
+	writeJSON(w, http.StatusOK, bridgeContinueResponse{Status: "launched codex resume", ID: thread.ID})
 }
 
 func (s bridgeServer) serveThreadEvents(w http.ResponseWriter, r *http.Request, idPart string) {
@@ -529,6 +703,21 @@ func launchCodexResumeTerminal(thread codex.Thread, options bridgeLaunchOptions)
 	return launchCodexDetached(thread.CWD, "codex-"+shortID(thread.ID), line)
 }
 
+func launchCodexNewTerminal(cwd string, options bridgeLaunchOptions) (codex.Thread, error) {
+	cwd = normalizeDir(cwd)
+	if !dirExists(cwd) {
+		return codex.Thread{}, fmt.Errorf("project path not found: %s", cwd)
+	}
+	line := codexNewMissionShellLineWithOptions(cwd, options)
+	if err := launchCodexDetached(cwd, "codex-"+filepath.Base(cwd), line); err != nil {
+		return codex.Thread{}, err
+	}
+	return codex.Thread{
+		Title: filepath.Base(cwd),
+		CWD:   cwd,
+	}, nil
+}
+
 func codexResumeShellLineWithOptions(thread codex.Thread, options bridgeLaunchOptions) string {
 	if strings.TrimSpace(options.Model) == "" && strings.TrimSpace(options.ReasoningEffort) == "" {
 		return codexResumeShellLine(thread, options.Prompt)
@@ -541,6 +730,24 @@ func codexResumeShellLineWithOptions(thread codex.Thread, options bridgeLaunchOp
 		parts = append(parts, "-c", shellQuote(fmt.Sprintf(`model_reasoning_effort="%s"`, effort)))
 	}
 	parts = append(parts, shellQuote(thread.ID))
+	if strings.TrimSpace(options.Prompt) != "" {
+		parts = append(parts, shellQuote(options.Prompt))
+	}
+	parts = append(parts, ";", "printf", shellQuote("\\n[codex exited - press enter or close this terminal]\\n"), ";", "exec", "${SHELL:-/bin/zsh}", "-l")
+	return strings.Join(parts, " ")
+}
+
+func codexNewMissionShellLineWithOptions(cwd string, options bridgeLaunchOptions) string {
+	if strings.TrimSpace(options.Model) == "" && strings.TrimSpace(options.ReasoningEffort) == "" {
+		return codexNewMissionShellLine(cwd, options.Prompt)
+	}
+	parts := []string{"cd", shellQuote(cwd), "&&", "codex"}
+	if model := strings.TrimSpace(options.Model); model != "" {
+		parts = append(parts, "-m", shellQuote(model))
+	}
+	if effort := normalizeReasoningEffort(options.ReasoningEffort); effort != "" {
+		parts = append(parts, "-c", shellQuote(fmt.Sprintf(`model_reasoning_effort="%s"`, effort)))
+	}
 	if strings.TrimSpace(options.Prompt) != "" {
 		parts = append(parts, shellQuote(options.Prompt))
 	}

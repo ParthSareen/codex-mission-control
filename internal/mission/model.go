@@ -19,7 +19,7 @@ import (
 	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
-const reviewBaseBranch = "main"
+const reviewBaseBranch = "origin/main"
 const gitRefreshInterval = 5 * time.Second
 
 type screenMode int
@@ -78,6 +78,11 @@ type Model struct {
 	introSplash  bool
 	introActive  bool
 	preflight    []preflightCheck
+	approvals    *codexApprovalBroker
+	controller   *codexThreadController
+
+	codexApprovals []codexApproval
+	approvalCursor int
 
 	askMode bool
 	ask     textinput.Model
@@ -226,6 +231,7 @@ func New(codexHome string, limit int) Model {
 	mi.Prompt = "DIR> "
 	mi.CharLimit = 4000
 	mi.Width = 80
+	approvals := newCodexApprovalBroker(true)
 
 	model := Model{
 		store:        codex.NewStore(codexHome),
@@ -239,6 +245,8 @@ func New(codexHome string, limit int) Model {
 		introSplash:  true,
 		introActive:  true,
 		preflight:    defaultPreflightChecks(),
+		approvals:    approvals,
+		controller:   newCodexThreadController(approvals),
 		ask:          ti,
 		missionInput: mi,
 	}
@@ -268,6 +276,7 @@ func (m Model) RefreshNow() Model {
 	m.events = m.loadSelectedEvents()
 	m.git = loadGitSnapshot(m.selectedThread().CWD)
 	m.cacheGitSnapshot(m.git, time.Now())
+	m.syncCodexApprovals()
 	m.ensureCommsCache()
 	m.lastUpdate = time.Now()
 	return m
@@ -293,6 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.tick++
+		m.syncCodexApprovals()
 		m.ensureCommsCache()
 		cmds := []tea.Cmd{tickEvery(260 * time.Millisecond)}
 		if !m.paused && m.tick%4 == 0 {
@@ -305,6 +315,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err.Error()
 			return m, nil
 		}
+		m.syncCodexApprovals()
 		prevID := m.selectedThread().ID
 		if msg.rolloutCache != nil {
 			m.rolloutCache = msg.rolloutCache
@@ -431,6 +442,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.introActive && m.introSplash {
 			switch msg.String() {
 			case "q", "ctrl+c":
+				m.closeController()
 				return m, tea.Quit
 			default:
 				m.introActive = false
@@ -498,7 +510,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if prompt == "" {
 				return m, nil
 			}
-			return m, launchCodexCmd(m.selectedThread(), prompt)
+			return m, continueCodexCmd(m.controller, m.selectedThread(), prompt)
 		default:
 			var cmd tea.Cmd
 			m.ask, cmd = m.ask.Update(msg)
@@ -508,6 +520,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch key {
 	case "q", "ctrl+c":
+		m.closeController()
 		return m, tea.Quit
 	case "n":
 		m.startMission()
@@ -655,8 +668,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		m.paused = !m.paused
 		return m, nil
+	case "p":
+		m.nextCodexApproval()
+		return m, nil
+	case "A":
+		m.decideSelectedCodexApproval("approve")
+		return m, nil
+	case "S":
+		m.decideSelectedCodexApproval("approve_for_session")
+		return m, nil
+	case "D":
+		m.decideSelectedCodexApproval("deny")
+		return m, nil
 	case "r":
-		return m, launchCodexCmd(m.selectedThread(), "")
+		return m, continueCodexCmd(m.controller, m.selectedThread(), "")
 	case "d":
 		return m, diffviewCmd(m.selectedThread())
 	case "R", "a":
@@ -837,7 +862,7 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "review launch canceled: empty branch"
 				return m, nil
 			}
-			return m, launchReviewBranchMissionCmd(dir, branch)
+			return m, launchReviewBranchMissionCmd(m.controller, dir, branch)
 		}
 		if m.missionMode == missionNewBranch {
 			name := strings.TrimSpace(m.missionInput.Value())
@@ -855,7 +880,7 @@ func (m Model) handleMissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "mission launch canceled: empty mission"
 			return m, nil
 		}
-		return m, launchNewMissionCmd(dir, prompt)
+		return m, launchNewMissionCmd(m.controller, dir, prompt)
 	}
 
 	if m.missionMode == missionSelectKind {
@@ -1147,6 +1172,105 @@ func (m *Model) openSearchThread(index int) {
 	m.resetCommsPosition()
 }
 
+func (m *Model) syncCodexApprovals() {
+	if m.approvals == nil {
+		m.codexApprovals = nil
+		m.approvalCursor = 0
+		return
+	}
+	m.codexApprovals = m.approvals.List()
+	if len(m.codexApprovals) == 0 {
+		m.approvalCursor = 0
+		return
+	}
+	m.approvalCursor = max(0, min(len(m.codexApprovals)-1, m.approvalCursor))
+}
+
+func (m *Model) nextCodexApproval() {
+	m.syncCodexApprovals()
+	if len(m.codexApprovals) == 0 {
+		m.status = "no pending Codex approval"
+		return
+	}
+	m.approvalCursor = (m.approvalCursor + 1) % len(m.codexApprovals)
+	approval := m.codexApprovals[m.approvalCursor]
+	m.selectThreadForApproval(approval)
+	m.status = "selected Codex approval " + shortApprovalID(approval.ID)
+}
+
+func (m *Model) decideSelectedCodexApproval(decision string) {
+	m.syncCodexApprovals()
+	if m.approvals == nil || len(m.codexApprovals) == 0 {
+		m.status = "no pending Codex approval"
+		return
+	}
+	approval := m.selectedCodexApproval()
+	if approval.ID == "" {
+		m.status = "no pending Codex approval"
+		return
+	}
+	decided, ok, err := m.approvals.Decide(approval.ID, decision)
+	if err != nil {
+		m.status = "approval failed: " + err.Error()
+		return
+	}
+	if !ok {
+		m.status = "approval no longer pending"
+		m.syncCodexApprovals()
+		return
+	}
+	m.status = approvalStatusText(decided, decision)
+	m.syncCodexApprovals()
+}
+
+func (m Model) selectedCodexApproval() codexApproval {
+	thread := m.selectedThread()
+	for _, approval := range m.codexApprovals {
+		if approvalMatchesThread(approval, thread) {
+			return approval
+		}
+	}
+	if len(m.codexApprovals) == 0 {
+		return codexApproval{}
+	}
+	idx := max(0, min(len(m.codexApprovals)-1, m.approvalCursor))
+	return m.codexApprovals[idx]
+}
+
+func (m Model) codexApprovalsForThread(thread codex.Thread) []codexApproval {
+	if thread.ID == "" {
+		return nil
+	}
+	var out []codexApproval
+	for _, approval := range m.codexApprovals {
+		if approvalMatchesThread(approval, thread) {
+			out = append(out, approval)
+		}
+	}
+	return out
+}
+
+func (m Model) hasCodexApprovalForThread(thread codex.Thread) bool {
+	return len(m.codexApprovalsForThread(thread)) > 0
+}
+
+func (m *Model) selectThreadForApproval(approval codexApproval) {
+	for i, thread := range m.threads {
+		if approvalMatchesThread(approval, thread) {
+			m.selected = i
+			m.events = m.loadSelectedEvents()
+			m.resetCommsPosition()
+			return
+		}
+	}
+}
+
+func (m *Model) closeController() {
+	if m.controller != nil {
+		m.controller.Close()
+	}
+}
+
 func refreshCmd(m Model) tea.Cmd {
 	rolloutCache := m.rolloutCache.Clone()
 	gitCache := cloneGitCache(m.gitCache)
@@ -1213,6 +1337,22 @@ func resumeCmd(thread codex.Thread, prompt string) tea.Cmd {
 	}
 }
 
+func continueCodexCmd(controller *codexThreadController, thread codex.Thread, prompt string) tea.Cmd {
+	return func() tea.Msg {
+		if thread.ID == "" {
+			return launchDoneMsg{err: fmt.Errorf("no selected thread")}
+		}
+		if strings.TrimSpace(thread.CWD) == "" {
+			return launchDoneMsg{err: fmt.Errorf("selected thread has no cwd")}
+		}
+		line := codexResumeShellLine(thread, prompt)
+		if err := launchCodexDetached(thread.CWD, "codex-"+shortID(thread.ID), line); err != nil {
+			return launchDoneMsg{err: err}
+		}
+		return launchDoneMsg{status: "launched codex resume"}
+	}
+}
+
 func launchCodexCmd(thread codex.Thread, prompt string) tea.Cmd {
 	return func() tea.Msg {
 		if thread.ID == "" {
@@ -1229,21 +1369,21 @@ func launchCodexCmd(thread codex.Thread, prompt string) tea.Cmd {
 	}
 }
 
-func launchNewMissionCmd(cwd, prompt string) tea.Cmd {
+func launchNewMissionCmd(controller *codexThreadController, cwd, prompt string) tea.Cmd {
 	return func() tea.Msg {
 		cwd = normalizeDir(cwd)
 		if !dirExists(cwd) {
 			return launchDoneMsg{err: fmt.Errorf("mission dir not found: %s", cwd)}
 		}
 		line := codexNewMissionShellLine(cwd, prompt)
-		if err := launchCodexDetached(cwd, "codex-mission", line); err != nil {
+		if err := launchCodexDetached(cwd, "codex-"+filepath.Base(cwd), line); err != nil {
 			return launchDoneMsg{err: err}
 		}
-		return launchDoneMsg{status: "launched new mission"}
+		return launchDoneMsg{status: "launched new Codex mission"}
 	}
 }
 
-func launchReviewBranchMissionCmd(repoDir, branch string) tea.Cmd {
+func launchReviewBranchMissionCmd(controller *codexThreadController, repoDir, branch string) tea.Cmd {
 	return func() tea.Msg {
 		worktreeDir, err := createReviewWorktree(repoDir, branch)
 		if err != nil {
@@ -1253,11 +1393,12 @@ func launchReviewBranchMissionCmd(repoDir, branch string) tea.Cmd {
 		if err != nil {
 			return launchDoneMsg{err: err}
 		}
-		line := codexReviewShellLine(worktreeDir, reviewBaseBranch, mergeBase)
-		if err := launchCodexDetached(worktreeDir, "codex-review", line); err != nil {
+		prompt := reviewPrompt(branch, reviewBaseBranch, mergeBase)
+		line := codexNewMissionShellLine(worktreeDir, prompt)
+		if err := launchCodexDetached(worktreeDir, "codex-"+filepath.Base(worktreeDir), line); err != nil {
 			return launchDoneMsg{err: err}
 		}
-		return launchDoneMsg{status: "launched review branch in " + worktreeDir}
+		return launchDoneMsg{status: "launched review branch: " + worktreeDir}
 	}
 }
 
@@ -1440,12 +1581,40 @@ func codexNewMissionShellLine(cwd, prompt string) string {
 	return strings.Join(parts, " ")
 }
 
-func codexReviewShellLine(cwd, baseBranch, mergeBase string) string {
-	return codexNewMissionShellLine(cwd, reviewPrompt(baseBranch, mergeBase))
+func codexReviewShellLine(cwd, branch, baseBranch, mergeBase string) string {
+	return codexNewMissionShellLine(cwd, reviewPrompt(branch, baseBranch, mergeBase))
 }
 
-func reviewPrompt(baseBranch, mergeBase string) string {
-	return fmt.Sprintf("Review the code changes against the base branch '%s'. The merge base commit for this comparison is %s. Run `git diff %s` to inspect the changes relative to %s. Provide prioritized, actionable findings.", baseBranch, mergeBase, mergeBase, baseBranch)
+func reviewPrompt(branch, baseBranch, mergeBase string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		branch = "this branch"
+	}
+	return fmt.Sprintf(`# Review Guidelines
+
+You are acting as a reviewer for a proposed code change made by another engineer. Review the change and respond in normal Markdown. Do not return JSON, XML, a findings object, or any structured review schema.
+
+When feedback should be attached directly to a changed line, emit one `+"`::code-comment{...}`"+` directive for that issue. The directive creates an inline code comment in the review UI; keep the visible response as normal Markdown. Emit no directives when there are no actionable inline comments.
+
+Required `+"`code-comment`"+` attributes: `+"`title`"+`, `+"`body`"+`, and `+"`file`"+`. Optional attributes: `+"`start`"+`, `+"`end`"+`, and `+"`priority`"+`. Use the shortest useful line range. `+"`file`"+` should be an absolute path or include the workspace folder segment.
+
+Focus on discrete, actionable issues the original author would likely fix if they knew about them. Prefer no issues over speculative or low-signal feedback.
+
+General guidelines for whether to call out an issue:
+1. It meaningfully impacts correctness, performance, security, or maintainability.
+2. It is discrete and actionable.
+3. It was introduced by the change under review.
+4. The author would likely fix it once aware.
+5. It does not rely on unstated assumptions about intent.
+6. It identifies the affected behavior clearly rather than speculating broadly.
+
+When you call out an issue, include the relevant file and line or function in prose, explain the scenario where it matters, and keep the explanation concise. Use priority labels such as `+"`[P1]`"+` or `+"`[P2]`"+` only when helpful to communicate severity. If there are no actionable issues, say that directly and briefly.
+
+Review the code changes against the base branch '%s'. The merge base commit for this comparison is %s. Run `+"`git diff %s`"+` to inspect the changes relative to %s. Provide concise, actionable feedback in a normal Markdown response.
+
+## My request for Codex
+
+Please review changes on %s against %s.`, baseBranch, mergeBase, mergeBase, baseBranch, branch, baseBranch)
 }
 
 func shellQuote(s string) string {
@@ -1470,14 +1639,23 @@ func reviewMergeBase(cwd, baseBranch string) (string, error) {
 	if baseBranch == "" {
 		return "", fmt.Errorf("empty base branch")
 	}
-	if mergeBase, err := gitOutput(cwd, "merge-base", baseBranch, "HEAD"); err == nil {
-		return mergeBase, nil
+	candidates := []string{baseBranch}
+	if strings.HasPrefix(baseBranch, "origin/") {
+		candidates = append(candidates, strings.TrimPrefix(baseBranch, "origin/"))
+	} else {
+		candidates = append(candidates, "origin/"+baseBranch)
 	}
-	remoteBase := "origin/" + baseBranch
-	if mergeBase, err := gitOutput(cwd, "merge-base", remoteBase, "HEAD"); err == nil {
-		return mergeBase, nil
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		if mergeBase, err := gitOutput(cwd, "merge-base", candidate, "HEAD"); err == nil {
+			return mergeBase, nil
+		}
 	}
-	return "", fmt.Errorf("git merge-base: could not find merge base against %s or %s", baseBranch, remoteBase)
+	return "", fmt.Errorf("git merge-base: could not find merge base against %s", strings.Join(candidates, " or "))
 }
 
 func loadGitSnapshot(cwd string) gitSnapshot {
@@ -2233,6 +2411,9 @@ func (m Model) needsReview(thread codex.Thread) bool {
 }
 
 func (m Model) displayStatus(thread codex.Thread) string {
+	if m.hasCodexApprovalForThread(thread) {
+		return "ALERT"
+	}
 	if codex.Status(thread) == "ALERT" {
 		return "ALERT"
 	}
@@ -2240,6 +2421,78 @@ func (m Model) displayStatus(thread codex.Thread) string {
 		return "REVIEW"
 	}
 	return codex.Status(thread)
+}
+
+func approvalMatchesThread(approval codexApproval, thread codex.Thread) bool {
+	if thread.ID == "" {
+		return false
+	}
+	if approval.ThreadID != "" && approval.ThreadID == thread.ID {
+		return true
+	}
+	threadCWD := normalizeDir(thread.CWD)
+	if threadCWD == "" {
+		return false
+	}
+	for _, path := range []string{approval.CWD, approval.GrantRoot} {
+		if sameOrInsidePath(path, threadCWD) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameOrInsidePath(path, root string) bool {
+	path = normalizeDir(path)
+	root = normalizeDir(root)
+	if path == "" || root == "" {
+		return false
+	}
+	if path == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func approvalStatusText(approval codexApproval, decision string) string {
+	action := "denied"
+	switch normalized, err := normalizeCodexApprovalDecision(decision); {
+	case err != nil:
+		action = strings.TrimSpace(decision)
+	case normalized == codexApprovalApprove:
+		action = "approved"
+	case normalized == codexApprovalApproveForSession:
+		action = "approved for session"
+	case normalized == codexApprovalCancel:
+		action = "canceled"
+	}
+	return action + " Codex " + approvalKindLabel(approval)
+}
+
+func approvalKindLabel(approval codexApproval) string {
+	switch approval.Kind {
+	case "command":
+		return "command"
+	case "file_change":
+		return "file change"
+	default:
+		return "request"
+	}
+}
+
+func shortApprovalID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "unknown"
+	}
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
 }
 
 func (m Model) selectedCommsText() string {

@@ -3,26 +3,42 @@
 Small SwiftUI companion app for choosing an existing Codex thread, monitoring
 its latest rollout events, and sending prompts through the Mac-side bridge.
 
-## Run the bridge
+## Run the services
 
 From the repo root:
 
 ```sh
-go run ./cmd/cmc-bridge
+go run ./cmd/cmc serve
 ```
 
-The simulator uses `http://127.0.0.1:8765` by default.
-
-For a physical iPhone with Tailscale, bind the bridge only to your Mac's
-Tailscale IPv4 address:
+For an installed binary:
 
 ```sh
-go run ./cmd/cmc-bridge --tailscale
+cmc serve
 ```
 
-The bridge prints the exact `http://100.x.y.z:8765` URL. Set the app's bridge
-URL to that value. This does not bind the bridge to public interfaces or normal
-Wi-Fi/LAN addresses.
+This starts the Codex bridge and Zuko approval server in the background. By
+default both bind only to your Mac's Tailscale IPv4 address. The command prints
+the two URLs to enter in the app:
+
+- Codex bridge URL, usually `http://100.x.y.z:8765`
+- Zuko approvals URL, usually `http://100.x.y.z:9777`
+
+For simulator-only local testing:
+
+```sh
+go run ./cmd/cmc serve --local
+```
+
+This uses `http://127.0.0.1:8765` for the bridge and `http://127.0.0.1:9777`
+for Zuko approvals.
+
+Check or stop the background services with:
+
+```sh
+cmc serve --status
+cmc serve --stop
+```
 
 ## Open the app
 
@@ -34,12 +50,18 @@ recent rollout events; the detail screen refreshes every 5 seconds while it is
 open. From that screen you can send a typed prompt or command into the selected
 thread, override the model, and override reasoning speed.
 
+Normal Codex app-server exec and file-change prompts are sent to the app for
+Face ID/passcode approval by default. Matching Codex and Zuko requests appear
+inside the active thread while you are viewing it. Tap the shield button for the
+full approvals sheet, where you can disable Codex approvals or enter the Zuko
+approvals URL from `cmc serve` and the token from `zuko pair`.
+
 Tap New Chat to choose a project under `~/Documents/repos` and start a fresh
 headless Codex thread there. The bridge only accepts directories that resolve
 inside that project root. If needed, run the bridge with:
 
 ```sh
-go run ./cmd/cmc-bridge --projects-root /path/to/repos
+go run ./cmd/cmc serve --projects-root /path/to/repos
 ```
 
 The bridge owns one persistent headless `codex app-server` process. Prompt

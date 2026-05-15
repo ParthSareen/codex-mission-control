@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0E2B4C7A89D14E53AA710001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0E2B4C7A89D14E53AA710003 /* Assets.xcassets */; };
 		52E6C642618A3123DE834F5A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 261DB9CCA2353EFE4ED39179 /* ContentView.swift */; };
 		919EA7BE7C4C124D21DCCF60 /* CodexAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 446065842E6CE8FE422AA5A3 /* CodexAPI.swift */; };
 		FEAF79A2DE5975B05222F625 /* CodexSessionControlApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E975207081591CCF5185EA67 /* CodexSessionControlApp.swift */; };
@@ -14,6 +15,8 @@
 
 /* Begin PBXFileReference section */
 		01421E5350E129A15AB1E1A9 /* Codex Control.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Codex Control.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		0E2B4C7A89D14E53AA710002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0E2B4C7A89D14E53AA710003 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		261DB9CCA2353EFE4ED39179 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		446065842E6CE8FE422AA5A3 /* CodexAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAPI.swift; sourceTree = "<group>"; };
 		E975207081591CCF5185EA67 /* CodexSessionControlApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexSessionControlApp.swift; sourceTree = "<group>"; };
@@ -24,6 +27,7 @@
 			isa = PBXGroup;
 			children = (
 				C2FF525B2CE6458C94690F44 /* Sources */,
+				0E2B4C7A89D14E53AA710004 /* Resources */,
 				8AF8A07B0CBB9DD53FFC4BC2 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -46,6 +50,15 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		0E2B4C7A89D14E53AA710004 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				0E2B4C7A89D14E53AA710003 /* Assets.xcassets */,
+				0E2B4C7A89D14E53AA710002 /* Info.plist */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -54,6 +67,7 @@
 			buildConfigurationList = 6FD5C1AE9271794E1E192256 /* Build configuration list for PBXNativeTarget "CodexSessionControl" */;
 			buildPhases = (
 				D4B49D69DB4962FFE1CCD0A2 /* Sources */,
+				0E2B4C7A89D14E53AA710005 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -93,6 +107,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		0E2B4C7A89D14E53AA710005 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0E2B4C7A89D14E53AA710001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		D4B49D69DB4962FFE1CCD0A2 /* Sources */ = {
@@ -233,14 +258,15 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = 99BLGQZM5F;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.6;
+				MARKETING_VERSION = 0.11;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parthsareen.CodexSessionControl;
 				PRODUCT_NAME = "Codex Control";
 				SDKROOT = iphoneos;
@@ -254,14 +280,15 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = 99BLGQZM5F;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.6;
+				MARKETING_VERSION = 0.11;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parthsareen.CodexSessionControl;
 				PRODUCT_NAME = "Codex Control";
 				SDKROOT = iphoneos;

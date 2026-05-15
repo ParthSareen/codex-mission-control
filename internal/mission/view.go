@@ -9,6 +9,8 @@ import (
 	"github.com/parthsareen/codex-mission-control/internal/codex"
 )
 
+const liveTaskColor lipgloss.Color = "46"
+
 func (m Model) View() string {
 	if m.width <= 0 {
 		return "Loading Codex Mission Control..."
@@ -129,8 +131,9 @@ func (m Model) renderHeader() string {
 		pause = "  PAUSED"
 	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(t.primary).Render("CODEX MISSION CONTROL")
-	line := fmt.Sprintf("ACTIVE %02d   REVIEW %02d   ALERTS %02d   LAST SIGNAL %s   THEME %s%s",
-		active, review, alerts, lastSignal, strings.ToUpper(t.name), pause)
+	approvalCount := len(m.codexApprovals)
+	line := fmt.Sprintf("ACTIVE %02d   REVIEW %02d   ALERTS %02d   APPROVALS %02d   LAST SIGNAL %s   THEME %s%s",
+		active, review, alerts, approvalCount, lastSignal, strings.ToUpper(t.name), pause)
 	radar := m.renderRadar(max(12, m.width-6))
 	content := title + "  " + lipgloss.NewStyle().Foreground(t.text).Render(line) + "\n" + radar
 	return m.panel(m.width, 4, "", content, true)
@@ -155,24 +158,23 @@ func (m Model) renderRadar(width int) string {
 			pos = width - 1
 		}
 		thread := m.threads[i]
-		label := "*"
+		label := radarTaskGlyph(threadTask(thread))
+		status := m.displayStatus(thread)
 		style := lipgloss.NewStyle().Foreground(t.primary).Bold(true)
-		switch m.displayStatus(thread) {
+		switch status {
 		case "ALERT":
-			label = "!"
 			style = style.Foreground(t.err)
 		case "REVIEW":
-			label = "R"
 			style = style.Foreground(t.err)
+		case "LIVE":
+			style = style.Foreground(liveTaskColor)
 		case "FINAL":
-			label = "F"
 			style = style.Foreground(t.warn)
 		case "IDLE":
-			label = "+"
 			style = style.Foreground(t.dim)
 		}
 		if i == m.selected && m.tick%2 == 0 {
-			label = ">"
+			style = style.Background(t.panel).Foreground(selectedTaskColor(t, status)).Bold(true)
 		}
 		cells[pos] = style.Render(label)
 	}
@@ -218,7 +220,11 @@ func (m Model) renderMain(height int) string {
 	toolW := rightW - teleW - gitW
 	telemetry := m.panel(teleW, bottomH, "TELEMETRY", m.renderTelemetry(teleW-2, bottomH-3), false)
 	git := m.panel(gitW, bottomH, "GIT STATUS", m.renderGitStatus(gitW-2, bottomH-3), false)
-	tools := m.panel(toolW, bottomH, "TOOL TRACE", m.renderToolTrace(toolW-2, bottomH-3), false)
+	toolTitle := "TOOL TRACE"
+	if len(m.codexApprovals) > 0 {
+		toolTitle = fmt.Sprintf("APPROVALS %d", len(m.codexApprovals))
+	}
+	tools := m.panel(toolW, bottomH, toolTitle, m.renderToolTrace(toolW-2, bottomH-3), false)
 	bottom := lipgloss.JoinHorizontal(lipgloss.Top, telemetry, git, tools)
 	right := lipgloss.JoinVertical(lipgloss.Left, comms, bottom)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
@@ -308,7 +314,7 @@ func (m Model) renderMissionContent(width, height int) string {
 			"",
 			fit(m.missionInput.View(), width),
 			"",
-			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter launches a new Codex session in Ghostty/tmux; esc cancels", width)),
+			lipgloss.NewStyle().Foreground(t.dim).Render(fit("enter starts a new Codex session in CMC; esc cancels", width)),
 		)
 	case missionReviewBranch:
 		rows = append(rows,
@@ -485,14 +491,14 @@ func (m Model) renderFleetEntry(entry fleetEntry, width int) string {
 	case "ALERT", "REVIEW":
 		style = style.Foreground(t.err).Bold(true)
 	case "LIVE":
-		style = style.Foreground(t.primary)
+		style = style.Foreground(liveTaskColor)
 	case "FINAL":
 		style = style.Foreground(t.warn)
 	case "IDLE":
 		style = style.Foreground(t.dim)
 	}
 	if entry.threadIndex == m.selected {
-		style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+		style = style.Background(t.panel).Foreground(selectedTaskColor(t, entry.status)).Bold(true)
 	}
 
 	callsign := fleetCallsign(entry.number)
@@ -520,6 +526,10 @@ func (m Model) renderSelectedChannel(width, height int) string {
 		fit(fmt.Sprintf("%s  %s  %s", fleetCallsign(m.selectedFleetNumber()), status, truncate(thread.Title, max(8, width-16))), width),
 		fit(fmt.Sprintf("cwd %-18s model %-10s age %s", truncate(basename(thread.CWD), 18), truncate(fallback(thread.Model, thread.ModelProvider), 10), age(thread.UpdatedAtMS, thread.Summary.LastEventAt)), width),
 		fit(fmt.Sprintf("signal %-10s tools %-4d failures %-3d tokens %s", threadSignal(thread), thread.Summary.ToolCalls, thread.Summary.ToolFailures, compactInt(thread.TokensUsed)), width),
+	}
+	if approval := firstApproval(m.codexApprovalsForThread(thread)); approval.ID != "" {
+		rows = append(rows, fit("approval "+truncate(approvalSummary(approval), max(1, width-9)), width))
+		rows = append(rows, fit("keys     A approve  S session  D deny", width))
 	}
 	latest := thread.Summary.LastFinal
 	if status == "ALERT" && thread.Summary.LastKind == "escalation" {
@@ -555,9 +565,15 @@ func (m Model) renderSelectedChannel(width, height int) string {
 			style = style.Foreground(t.primary).Bold(true)
 			if status == "ALERT" || status == "REVIEW" {
 				style = style.Foreground(t.err).Bold(true)
+			} else if status == "LIVE" {
+				style = style.Foreground(liveTaskColor).Bold(true)
 			} else if status == "FINAL" {
 				style = style.Foreground(t.warn).Bold(true)
 			}
+		} else if strings.HasPrefix(strings.TrimSpace(row), "approval") {
+			style = style.Foreground(t.err).Bold(true)
+		} else if strings.HasPrefix(strings.TrimSpace(row), "keys") {
+			style = style.Foreground(t.dim)
 		} else if i == len(rows)-1 && (status == "ALERT" || status == "REVIEW") {
 			style = style.Foreground(t.err)
 		}
@@ -568,13 +584,16 @@ func (m Model) renderSelectedChannel(width, height int) string {
 
 func (m Model) renderThreads(width, height int) string {
 	t := m.theme()
+	if height <= 0 {
+		return ""
+	}
 	if len(m.threads) == 0 {
 		if m.err != "" {
 			return lipgloss.NewStyle().Foreground(t.err).Render(m.err)
 		}
 		return lipgloss.NewStyle().Foreground(t.dim).Render("No Codex threads detected.")
 	}
-	var lines []string
+	lines := m.renderThreadLegend(width, height)
 	for i, thread := range m.threads {
 		if len(lines) >= height {
 			break
@@ -583,7 +602,7 @@ func (m Model) renderThreads(width, height int) string {
 		style := lipgloss.NewStyle().Foreground(t.text)
 		switch status {
 		case "LIVE":
-			style = style.Foreground(t.primary)
+			style = style.Foreground(liveTaskColor)
 		case "FINAL":
 			style = style.Foreground(t.warn)
 		case "REVIEW":
@@ -594,9 +613,10 @@ func (m Model) renderThreads(width, height int) string {
 		prefix := " "
 		if i == m.selected {
 			prefix = ">"
-			style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+			style = style.Background(t.panel).Foreground(selectedTaskColor(t, status)).Bold(true)
 		}
-		line := fmt.Sprintf("%s %-5s %-4s %s", prefix, status, age(thread.UpdatedAtMS, thread.Summary.LastEventAt), truncate(thread.Title, width-15))
+		task := threadTask(thread)
+		line := fmt.Sprintf("%s%-3s %-5s %-4s %s", prefix, task.code, status, age(thread.UpdatedAtMS, thread.Summary.LastEventAt), truncate(thread.Title, width-18))
 		lines = append(lines, style.Render(fit(line, width)))
 
 		preview := thread.Summary.LastFinal
@@ -616,6 +636,21 @@ func (m Model) renderThreads(width, height int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderThreadLegend(width, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	t := m.theme()
+	style := lipgloss.NewStyle().Foreground(t.dim)
+	lines := []string{
+		style.Render(fit("TYPE R=rev M=mis A=app", width)),
+	}
+	if height > 1 {
+		lines = append(lines, style.Render(fit("     S=sub X=exec ?=other", width)))
+	}
+	return lines
 }
 
 func (m Model) renderComms(width, height int) string {
@@ -697,8 +732,16 @@ func (m Model) renderTelemetry(width, height int) string {
 		kv("cwd", basename(thread.CWD), width),
 		kv("updated", age(thread.UpdatedAtMS, thread.Summary.LastEventAt)+" ago", width),
 		kv("tokens", compactInt(thread.TokensUsed), width),
-		kv("control", "r resume  R ask", width),
 	)
+	if approval := firstApproval(m.codexApprovalsForThread(thread)); approval.ID != "" {
+		rows = append(rows,
+			lipgloss.NewStyle().Foreground(t.err).Bold(true).Render(fit("pending "+truncate(approvalSummary(approval), max(1, width-8)), width)),
+			kv("approve", "A yes  S session  D no", width),
+		)
+	} else if len(m.codexApprovals) > 0 {
+		rows = append(rows, kv("approve", "p next  A yes  S session  D no", width))
+	}
+	rows = append(rows, kv("control", "r resume  R ask", width))
 	if thread.Summary.LastFinal != "" {
 		rows = append(rows, lipgloss.NewStyle().Foreground(t.warn).Render(fit("final: "+truncate(reviewSummaryText(thread.Summary.LastFinal), width-7), width)))
 	}
@@ -771,6 +814,9 @@ func (m Model) renderGitStatus(width, height int) string {
 
 func (m Model) renderToolTrace(width, height int) string {
 	t := m.theme()
+	if len(m.codexApprovals) > 0 {
+		return m.renderApprovalTrace(width, height)
+	}
 	var tools []codex.Event
 	for _, event := range m.events {
 		if event.Kind == "tool" || event.Kind == "tool-call" {
@@ -804,6 +850,66 @@ func (m Model) renderToolTrace(width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m Model) renderApprovalTrace(width, height int) string {
+	if height <= 0 {
+		return ""
+	}
+	t := m.theme()
+	selected := m.selectedCodexApproval()
+	rows := []string{
+		lipgloss.NewStyle().Foreground(t.dim).Render(fit("A approve  S session  D deny  p next", width)),
+	}
+	for _, approval := range m.codexApprovals {
+		if len(rows) >= height {
+			break
+		}
+		style := lipgloss.NewStyle().Foreground(t.err).Bold(true)
+		prefix := " "
+		if approval.ID == selected.ID {
+			prefix = ">"
+			style = style.Background(t.panel).Foreground(t.primary).Bold(true)
+		}
+		rows = append(rows, style.Render(fit(fmt.Sprintf("%s %-6s %s", prefix, approvalTraceKind(approval), truncate(approvalSummary(approval), max(1, width-9))), width)))
+		if approval.Reason != "" && len(rows) < height {
+			rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("  why "+truncate(oneLine(approval.Reason), max(1, width-6)), width)))
+		}
+		if approval.CWD != "" && len(rows) < height {
+			rows = append(rows, lipgloss.NewStyle().Foreground(t.dim).Render(fit("  cwd "+truncate(approval.CWD, max(1, width-6)), width)))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func approvalTraceKind(approval codexApproval) string {
+	switch approval.Kind {
+	case "command":
+		return "CMD"
+	case "file_change":
+		return "PATCH"
+	default:
+		return "REQ"
+	}
+}
+
+func firstApproval(approvals []codexApproval) codexApproval {
+	if len(approvals) == 0 {
+		return codexApproval{}
+	}
+	return approvals[0]
+}
+
+func approvalSummary(approval codexApproval) string {
+	switch approval.Kind {
+	case "file_change":
+		if len(approval.FileChanges) > 0 {
+			return fileChangeSummary(approval.FileChanges)
+		}
+		return fallback(approval.Command, "Apply file changes")
+	default:
+		return fallback(cleanExecCommand(approval.Command), "Codex approval request")
+	}
+}
+
 func (m Model) renderStatus() string {
 	t := m.theme()
 	focus := "threads"
@@ -812,9 +918,12 @@ func (m Model) renderStatus() string {
 	} else if m.focus == focusComms {
 		focus = "comms"
 	}
-	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  / search  n new  c comms  d diff  o fleet  r launch  R ask  t theme  space pause  q quit", focus)
+	left := fmt.Sprintf("focus:%s  1-9/0 jump  tab pane  j/k nav  / search  n new  c comms  d diff  o fleet  r resume  R ask  t theme  space pause  q quit", focus)
 	if m.mode == modeFocus {
-		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  / search  n new  d diff  o fleet  r launch  R ask  q quit", focus)
+		left = fmt.Sprintf("focus:%s  tab pane  j/k line  pgup/pgdn history  v select  y copy  l live  / search  n new  d diff  o fleet  r resume  R ask  q quit", focus)
+	}
+	if len(m.codexApprovals) > 0 {
+		left = fmt.Sprintf("codex approvals:%d  A approve  S approve-session  D deny  p next   %s", len(m.codexApprovals), left)
 	}
 	if m.status != "" {
 		left = m.status + "   " + left
@@ -1096,6 +1205,57 @@ func fleetCallsign(n int) string {
 	default:
 		return "[?]"
 	}
+}
+
+type threadTaskKind struct {
+	code  string
+	label string
+}
+
+func threadTask(thread codex.Thread) threadTaskKind {
+	source := strings.ToLower(strings.TrimSpace(thread.Source))
+	summary := thread.Summary
+	text := strings.ToLower(strings.Join([]string{
+		thread.Title,
+		summary.LastUser,
+		summary.LastAssistant,
+		summary.LastFinal,
+	}, "\n"))
+	switch {
+	case strings.Contains(source, "review") ||
+		strings.Contains(text, "# review guidelines") ||
+		strings.Contains(text, "review the code changes against") ||
+		strings.Contains(text, "please review changes on"):
+		return threadTaskKind{code: "[R]", label: "review"}
+	case strings.Contains(source, "subagent") || strings.Contains(source, "thread_spawn"):
+		return threadTaskKind{code: "[S]", label: "subagent"}
+	case source == "exec":
+		return threadTaskKind{code: "[X]", label: "exec"}
+	case source == "cli":
+		return threadTaskKind{code: "[M]", label: "mission"}
+	case source == "vscode":
+		return threadTaskKind{code: "[A]", label: "app"}
+	default:
+		return threadTaskKind{code: "[?]", label: "other"}
+	}
+}
+
+func radarTaskGlyph(task threadTaskKind) string {
+	code := strings.TrimSpace(task.code)
+	if strings.HasPrefix(code, "[") && strings.HasSuffix(code, "]") && len(code) >= 3 {
+		return strings.TrimSpace(code[1 : len(code)-1])
+	}
+	if code == "" {
+		return "?"
+	}
+	return truncate(code, 1)
+}
+
+func selectedTaskColor(t theme, status string) lipgloss.Color {
+	if status == "LIVE" {
+		return liveTaskColor
+	}
+	return t.primary
 }
 
 func threadSignal(thread codex.Thread) string {

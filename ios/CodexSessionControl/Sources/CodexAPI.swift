@@ -192,6 +192,130 @@ private struct CreateWorktreeRequest: Encodable {
     let name: String
 }
 
+struct CodexApproval: Decodable, Hashable, Identifiable {
+    let id: String
+    let kind: String
+    let method: String
+    let threadID: String?
+    let turnID: String?
+    let itemID: String?
+    let approvalID: String?
+    let command: String?
+    let cwd: String?
+    let reason: String?
+    let grantRoot: String?
+    let fileChanges: [String]?
+    let createdAt: String?
+    let expiresAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case method
+        case threadID = "thread_id"
+        case turnID = "turn_id"
+        case itemID = "item_id"
+        case approvalID = "approval_id"
+        case command
+        case cwd
+        case reason
+        case grantRoot = "grant_root"
+        case fileChanges = "file_changes"
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct CodexApprovalsResponse: Decodable {
+    let enabled: Bool?
+    let codexExecApprovalsEnabled: Bool?
+    let approvals: [CodexApproval]
+
+    var isEnabled: Bool {
+        enabled ?? codexExecApprovalsEnabled ?? false
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case codexExecApprovalsEnabled = "codex_exec_approvals_enabled"
+        case approvals
+    }
+}
+
+struct CodexApprovalSettingsResponse: Decodable {
+    let enabled: Bool?
+    let codexExecApprovalsEnabled: Bool?
+
+    var isEnabled: Bool {
+        enabled ?? codexExecApprovalsEnabled ?? false
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case codexExecApprovalsEnabled = "codex_exec_approvals_enabled"
+    }
+}
+
+struct CodexApprovalDecisionResponse: Decodable {
+    let status: String
+    let id: String
+    let decision: String
+}
+
+private struct CodexApprovalSettingsRequest: Encodable {
+    let enabled: Bool
+    let codexExecApprovalsEnabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case codexExecApprovalsEnabled = "codex_exec_approvals_enabled"
+    }
+}
+
+private struct CodexApprovalDecisionRequest: Encodable {
+    let decision: String
+}
+
+struct ZukoApproval: Decodable, Hashable, Identifiable {
+    let id: String
+    let tool: String
+    let args: [String]
+    let scope: String
+    let command: String
+    let digest: String?
+    let cwd: String?
+    let pid: Int?
+    let ppid: Int?
+    let createdAt: String?
+    let expiresAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case tool
+        case args
+        case scope
+        case command
+        case digest
+        case cwd
+        case pid
+        case ppid
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct ZukoApprovalsResponse: Decodable {
+    let approvals: [ZukoApproval]
+}
+
+struct ZukoDecisionResponse: Decodable {
+    let decision: String
+}
+
+private struct ZukoDecisionRequest: Encodable {
+    let decision: String
+}
+
 private struct APIErrorResponse: Decodable {
     let error: String
 }
@@ -354,9 +478,120 @@ struct CodexAPI {
         return try await perform(request, timeout: 30)
     }
 
+    func codexApprovalSettings() async throws -> CodexApprovalSettingsResponse {
+        let url = baseURL.appendingPathComponent("api/approvals/settings")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        return try await perform(request, timeout: 8)
+    }
+
+    func updateCodexApprovalSettings(enabled: Bool) async throws -> CodexApprovalSettingsResponse {
+        let url = baseURL.appendingPathComponent("api/approvals/settings")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(CodexApprovalSettingsRequest(
+            enabled: enabled,
+            codexExecApprovalsEnabled: enabled
+        ))
+        return try await perform(request, timeout: 8)
+    }
+
+    func codexApprovals() async throws -> CodexApprovalsResponse {
+        let url = baseURL.appendingPathComponent("api/approvals")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        return try await perform(request, timeout: 8)
+    }
+
+    func decideCodexApproval(id: String, decision: String) async throws -> CodexApprovalDecisionResponse {
+        let url = baseURL
+            .appendingPathComponent("api/approvals")
+            .appendingPathComponent(id)
+            .appendingPathComponent("decision")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(CodexApprovalDecisionRequest(decision: decision))
+        return try await perform(request, timeout: 10)
+    }
+
     private func perform<T: Decodable>(_ request: URLRequest, timeout: TimeInterval) async throws -> T {
         var request = request
         request.timeoutInterval = timeout
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch let error as URLError where error.code == .appTransportSecurityRequiresSecureConnection {
+            throw CodexAPIError.transportSecurity
+        } catch let error as URLError where error.code == .timedOut {
+            throw CodexAPIError.timedOut
+        }
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CodexAPIError.badStatus(-1)
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            if let error = try? JSONDecoder().decode(APIErrorResponse.self, from: data) {
+                throw CodexAPIError.server(error.error)
+            }
+            throw CodexAPIError.badStatus(httpResponse.statusCode)
+        }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+struct ZukoAPI {
+    let baseURL: URL
+    let token: String
+
+    init(baseURLString: String, token: String) throws {
+        var text = baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.localizedCaseInsensitiveContains("://") {
+            text = "http://\(text)"
+        }
+        guard let url = URL(string: text), url.scheme != nil, url.host != nil else {
+            throw CodexAPIError.invalidURL
+        }
+        baseURL = url
+        self.token = token.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func approvals() async throws -> [ZukoApproval] {
+        let url = baseURL.appendingPathComponent("v1/approvals")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        let response: ZukoApprovalsResponse = try await perform(request, timeout: 8)
+        return response.approvals
+    }
+
+    func decide(approvalID: String, decision: String) async throws -> ZukoDecisionResponse {
+        let url = baseURL
+            .appendingPathComponent("v1/approvals")
+            .appendingPathComponent(approvalID)
+            .appendingPathComponent("decision")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(ZukoDecisionRequest(decision: decision))
+        return try await perform(request, timeout: 10)
+    }
+
+    private func perform<T: Decodable>(_ request: URLRequest, timeout: TimeInterval) async throws -> T {
+        guard !token.isEmpty else {
+            throw CodexAPIError.server("Missing zuko token")
+        }
+
+        var request = request
+        request.timeoutInterval = timeout
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
         let data: Data
         let response: URLResponse
         do {

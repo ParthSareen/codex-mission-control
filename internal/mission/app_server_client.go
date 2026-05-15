@@ -26,8 +26,14 @@ type codexThreadController struct {
 	start  func() (*codexAppServerClient, error)
 }
 
-func newCodexThreadController() *codexThreadController {
-	return &codexThreadController{start: startCodexAppServerClient}
+func newCodexThreadController(approvalBrokers ...*codexApprovalBroker) *codexThreadController {
+	var approvals *codexApprovalBroker
+	if len(approvalBrokers) > 0 {
+		approvals = approvalBrokers[0]
+	}
+	return &codexThreadController{start: func() (*codexAppServerClient, error) {
+		return startCodexAppServerClient(approvals)
+	}}
 }
 
 func (c *codexThreadController) Continue(thread codex.Thread, options bridgeLaunchOptions) error {
@@ -115,10 +121,23 @@ func (c *codexThreadController) discardDeadClientLocked(client *codexAppServerCl
 	}
 }
 
+func (c *codexThreadController) Close() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.client != nil {
+		c.client.Close()
+		c.client = nil
+	}
+}
+
 type codexAppServerClient struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stderr *lockedTailBuffer
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stderr    *lockedTailBuffer
+	approvals *codexApprovalBroker
 
 	writeMu sync.Mutex
 
@@ -154,7 +173,7 @@ type codexRPCResponse struct {
 	err    error
 }
 
-func startCodexAppServerClient() (*codexAppServerClient, error) {
+func startCodexAppServerClient(approvalBrokers ...*codexApprovalBroker) (*codexAppServerClient, error) {
 	cmd := exec.Command("codex", "app-server")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -172,10 +191,15 @@ func startCodexAppServerClient() (*codexAppServerClient, error) {
 		return nil, fmt.Errorf("start codex app-server: %w", err)
 	}
 
+	var approvals *codexApprovalBroker
+	if len(approvalBrokers) > 0 {
+		approvals = approvalBrokers[0]
+	}
 	client := &codexAppServerClient{
 		cmd:         cmd,
 		stdin:       stdin,
 		stderr:      stderr,
+		approvals:   approvals,
 		pending:     make(map[string]chan codexRPCResponse),
 		activeTurns: make(map[string]string),
 		done:        make(chan struct{}),
@@ -425,7 +449,7 @@ func (c *codexAppServerClient) handleMessage(line []byte) {
 		return
 	}
 	if len(message.ID) > 0 && message.Method != "" {
-		c.respondToServerRequest(message)
+		go c.respondToServerRequest(message)
 		return
 	}
 	if message.Method != "" {
@@ -454,10 +478,12 @@ func (c *codexAppServerClient) handleResponse(message codexRPCMessage) {
 func (c *codexAppServerClient) respondToServerRequest(message codexRPCMessage) {
 	response := map[string]any{"id": json.RawMessage(message.ID)}
 	switch message.Method {
-	case "item/commandExecution/requestApproval":
-		response["result"] = map[string]any{"decision": "decline"}
-	case "item/fileChange/requestApproval":
-		response["result"] = map[string]any{"decision": "decline"}
+	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "execCommandApproval", "applyPatchApproval":
+		decision := codexApprovalDeny
+		if c.approvals != nil {
+			decision = c.approvals.Request(context.Background(), message.Method, message.Params)
+		}
+		response["result"] = map[string]any{"decision": codexServerApprovalDecision(message.Method, decision)}
 	case "item/tool/requestUserInput":
 		response["result"] = map[string]any{"answers": map[string]any{}}
 	case "item/tool/call":

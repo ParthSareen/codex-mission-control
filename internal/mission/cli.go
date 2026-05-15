@@ -11,6 +11,13 @@ import (
 )
 
 func RunCLI(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "serve":
+			return RunServe(args[1:], stdout, stderr)
+		}
+	}
+
 	home, _ := os.UserHomeDir()
 	defaultCodexHome := filepath.Join(home, ".codex")
 
